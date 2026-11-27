@@ -1,0 +1,29 @@
+{
+  "name": "pokemon-draft-league-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Analysis and practice engine for Pokemon Champions VGC draft league matches (team building, team preview, turn decisions).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "setup": "node scripts/setup-showdown.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "tsx scripts/bench.ts",
+    "validate": "tsx scripts/validate-team.ts",
+    "parse-log": "tsx scripts/parse-log.ts",
+    "check-parser": "tsx scripts/check-parser.ts"
+  },
+  "dependencies": {
+    "pokemon-showdown": "file:vendor/pokemon-showdown"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

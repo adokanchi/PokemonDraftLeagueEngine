@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+!examples/*.log
+.DS_Store
+.env
+bench-results/
