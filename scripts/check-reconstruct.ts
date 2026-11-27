@@ -3,26 +3,35 @@
  * battles from p1's knowledge plus the true opponent sets, and list every difference.
  *
  *   npm run check-reconstruct -- 100      # battles (default 60)
+ *   npm run check-reconstruct -- 100 --zoroark   # we have a Zoroark (--both: in odd seeds they do too)
  */
 import { legalChoices, sidesNeedingChoice, submit } from '../src/sim/battle.js';
 import { makeRng } from '../src/sim/play.js';
-import { randomBattle } from '../test/helpers.js';
+import { createBattle } from '../src/sim/battle.js';
+import { randomBattle, randomTeam } from '../test/helpers.js';
+import { teamWithZoroark } from '../test/zoroark-helpers.js';
 import { compareReconstruction } from '../test/reconstruct-check.js';
 
 const n = Number(process.argv[2] ?? 60);
 const verbose = process.argv.includes('--verbose');
+const zoroark = process.argv.includes('--zoroark');
 let checks = 0, bad = 0;
 const kinds: Record<string, number> = {};
 const examples: Record<string, string[]> = {};
 for (let seed = 1; seed <= n; seed++) {
-	const b = randomBattle(seed, true);
+	const b = zoroark
+		? createBattle({ p1: { name: 'Alice', team: teamWithZoroark(seed * 2 + 1) }, p2: { name: 'Bob', team: process.argv.includes('--both') && seed % 2 ? teamWithZoroark(seed * 2 + 2) : randomTeam(seed * 2 + 2) }, seed, keepLog: true })
+		: randomBattle(seed, true);
 	const rng = makeRng(seed);
+	let ownOrder: string[] | undefined;
 	while (!b.ended && b.turn < 40) {
+		// (Right after team preview, the party is in the order it was brought.)
+		if (zoroark && !ownOrder && b.turn >= 1) ownOrder = b.sides[0]!.pokemon.slice(0, 4).map(p => p.set.species);
 		const pend = sidesNeedingChoice(b);
 		if (pend.length === 2 && b.turn > 0 && !b.sides[0]!.activeRequest?.forceSwitch && !b.sides[1]!.activeRequest?.forceSwitch) {
 			checks++;
 			let problems: string[];
-			try { problems = compareReconstruction(b); } catch (e) { problems = [`turn ${b.turn}: crash ${(e as Error).message.split('\n')[0]}`]; }
+			try { problems = compareReconstruction(b, { ownOrder }); } catch (e) { problems = [`turn ${b.turn}: crash ${(e as Error).message.split('\n')[0]}`]; }
 			if (problems.length) {
 				bad++;
 				const seen = new Set<string>();

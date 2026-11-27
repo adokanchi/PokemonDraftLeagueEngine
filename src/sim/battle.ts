@@ -120,3 +120,10 @@ export function submit(battle: Battle, side: SideIndex, choice: string): boolean
 export function sidesNeedingChoice(battle: Battle): SideIndex[] {
 	return ([0, 1] as const).filter(i => sideRequest(battle, i) !== null);
 }
+
+/** Each set's name, species and max HP in this format (for the parser to see through our own Zoroark). */
+export function teamMaxHp(team: PokemonSet[], format?: ResolvedFormat): { name: string; species: string; maxHp: number }[] {
+	if (!team.length) return [];
+	const battle = createBattle({ format, p1: { name: 'a', team }, p2: { name: 'b', team }, seed: 1 });
+	return battle.sides[0]!.pokemon.map(p => ({ name: p.name, species: p.set.species, maxHp: p.maxhp }));
+}
