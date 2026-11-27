@@ -2,6 +2,8 @@
 import type { Battle, PokemonSet } from '../src/showdown.js';
 import { legalChoices } from '../src/sim/battle.js';
 import { reconstructBattle, withZoroarkAs } from '../src/engine/reconstruct.js';
+import { OpponentModel } from '../src/belief/sets.js';
+import { UniformPrior } from '../src/data/priors.js';
 import { parseBattleLog, viewOfLog } from '../src/state/parser.js';
 
 /** Bookkeeping volatiles with no effect on play from here (or re-created when needed). */
@@ -15,9 +17,19 @@ function normalize(battle: Battle, side: 0 | 1, choices: string[]): Set<string> 
 	return new Set(choices.map(c => c.replace(/switch (\d)/g, (_, i) => `switch ${mons[Number(i) - 1]!.set.species}`)));
 }
 
-export function compareReconstruction(real: Battle): string[] {
+/**
+ * `ownOrder`: p1's brought Pokémon in team order. When given, p1's state comes from the opponent
+ * model (as in search), which uses it to see through p1's own Zoroark.
+ */
+export function compareReconstruction(real: Battle, opts: { ownOrder?: string[] } = {}): string[] {
 	const out: string[] = [];
-	let state = parseBattleLog(viewOfLog(real.log, 'p1').join('\n'), { perspective: 'p1' });
+	const ownTeam = real.sides[0]!.pokemon.map(p => ({ name: p.name, species: p.set.species, maxHp: p.maxhp }));
+	let state = parseBattleLog(viewOfLog(real.log, 'p1').join('\n'), { perspective: 'p1', ownTeam });
+	if (opts.ownOrder) {
+		const model = new OpponentModel({ side: 'p2', ownTeam: real.sides[0]!.pokemon.map(p => p.set as PokemonSet), ownOrder: opts.ownOrder, prior: new UniformPrior() });
+		model.feedLog(viewOfLog(real.log, 'p1').join('\n'));
+		state = model.withOwnZoroark(model.state);
+	}
 	// A disguised opposing Zoroark: rebuild as the solver does when it guesses the disguise right.
 	for (const [slot, p] of real.sides[1]!.active.entries()) {
 		const ident = state.sides.p2.active[slot];

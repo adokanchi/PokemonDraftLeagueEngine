@@ -22,6 +22,7 @@
 import { toID, type Move, type PokemonSet, type Species } from '../showdown.js';
 import { resolveFormat, type ResolvedFormat } from '../config.js';
 import { BattleLogParser, type ParserEvent } from '../state/parser.js';
+import { teamMaxHp } from '../sim/battle.js';
 import type { MonState, SideId } from '../state/types.js';
 import type { TeamKnowledge } from '../state/knowledge.js';
 import { loadPrior, type SetPrior } from '../data/priors.js';
@@ -96,6 +97,11 @@ export interface IllusionOptions {
 	 * the probability (after this evidence) that the Pokémon in that slot is Zoroark.
 	 */
 	onReveal?: (e: ParserEvent, slot: number, pZoroark: number) => void;
+	/**
+	 * The analysed side's brought Pokémon in team order (leads first), when known — e.g. our own
+	 * side, to see through our own Zoroark. A prefix is fine (just the leads, say).
+	 */
+	broughtOrder?: string[];
 }
 
 export interface SlotReport {
@@ -175,6 +181,7 @@ export class IllusionTracker {
 		this.perspective = opts.ownTeam ? other : undefined;
 		this.parser = new BattleLogParser({
 			format: this.format, perspective: this.perspective,
+			ownTeam: opts.ownTeam?.length ? teamMaxHp(opts.ownTeam, this.format) : undefined,
 			onEvent: e => this.pendingEvents.push(e),
 		});
 	}
@@ -301,6 +308,8 @@ export class IllusionTracker {
 		const pick = Math.min(4, this.mySide.teamSize ?? 4);
 		const rec = (chosen: number[]) => {
 			if (chosen.length === pick) {
+				const known = this.opts.broughtOrder ?? [];
+				if (known.some((s, i) => i < chosen.length && !this.sameSpecies(this.preview[chosen[i]!]!, s))) return;
 				this.hyps.push({
 					w: 1, order: chosen.map((_, i) => i), disguised: [false, false], stintZ: new Map(), actorPhys: new Map(),
 					phys: chosen.map(i => ({ ...template[i]!, moves: [...template[i]!.moves] })),

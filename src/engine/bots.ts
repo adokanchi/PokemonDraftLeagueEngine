@@ -48,6 +48,8 @@ export class SolverBot implements Policy {
 		if (!this.model) {
 			this.model = new OpponentModel({
 				side: me === 'p1' ? 'p2' : 'p1', ownTeam: battle.sides[side]!.team as PokemonSet[],
+				// (Right after team preview the party is in the order we brought it.)
+				ownOrder: battle.sides[side]!.pokemon.slice(0, 4).map(p => p.set.species),
 				prior: this.opts.prior, seed: this.opts.seed,
 			});
 		}
@@ -56,6 +58,8 @@ export class SolverBot implements Policy {
 		try {
 			const res = solveTurn({
 				state: this.model.state, me, myTeam: battle.sides[side]!.pokemon.map(p => p.set as PokemonSet), model: this.model,
+				// We know our own Pokémon, whatever disguise the log shows.
+				ownZoroark: battle.sides[side]!.active.map((p, slot) => ({ slot, isZoroark: !!p && p.baseSpecies.baseSpecies === 'Zoroark' })),
 				options: { seed: Math.floor(this.rng() * 1e6), ...this.opts.solve },
 			});
 			this.last = res;

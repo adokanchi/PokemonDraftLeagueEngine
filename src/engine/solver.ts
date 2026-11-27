@@ -189,6 +189,8 @@ export interface SolveInput {
 	myTeam: PokemonSet[];
 	model: OpponentModel;
 	options?: SolveOptions;
+	/** Which of our active slots hold our own Zoroark, when we know (the log only shows its disguise). */
+	ownZoroark?: { slot: number; isZoroark: boolean }[];
 }
 
 export function solveTurn(input: SolveInput): SolveResult {
@@ -205,7 +207,7 @@ export function solveTurn(input: SolveInput): SolveResult {
 	for (let k = 0; k < o.samples; k++) {
 		const sample = input.model.sampleTeam();
 		if (sample.sets.length === 0) continue;
-		let state = input.state;
+		let state = input.model.withOwnZoroark(input.state, input.ownZoroark);
 		if (sample.zoroarkIdent) {
 			const zoro = sample.sets.find(s => s.species.startsWith('Zoroark'));
 			if (zoro) state = withZoroarkAs(state, themId, sample.zoroarkIdent, zoro.species);

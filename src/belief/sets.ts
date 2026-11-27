@@ -18,7 +18,8 @@ import { Teams, toID, type PokemonSet } from '../showdown.js';
 import { resolveFormat, type ResolvedFormat } from '../config.js';
 import { loadPrior, UniformPrior, type SetPrior } from '../data/priors.js';
 import type { TeamKnowledge } from '../state/knowledge.js';
-import type { MonState, SideId } from '../state/types.js';
+import type { KnownBattleState, MonState, SideId } from '../state/types.js';
+import { withZoroarkAs } from '../engine/reconstruct.js';
 import { IllusionTracker } from './illusion.js';
 import { DamageCalc } from './damage.js';
 import { fits, HitRecorder, skipReason, type HitObservation } from './hits.js';
@@ -63,6 +64,11 @@ export interface OpponentModelOptions {
 	megaStones?: Record<string, string>;
 	/** Candidate sets kept per species. */
 	poolSize?: number;
+	/**
+	 * The four we brought, in team order (leads first), if known. With a Zoroark on our team it
+	 * tells exactly when ours is in disguise (Showdown's disguise rule needs the party order).
+	 */
+	ownOrder?: string[];
 	seed?: number;
 }
 
@@ -70,6 +76,8 @@ const STAT_IDS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'] as const;
 
 export class OpponentModel {
 	readonly illusion: IllusionTracker;
+	/** Our own side, when we have a Zoroark: which of our active Pokémon is it in disguise. */
+	private ownIllusion?: IllusionTracker;
 	readonly side: SideId;
 	private format: ResolvedFormat;
 	private prior: SetPrior;
@@ -103,6 +111,9 @@ export class OpponentModel {
 			onReveal: (e, slot, pZ) => this.onReveal(e.mon, e.type, e.type === 'ability' ? e.ability : e.type === 'item' ? e.item : e.move, pZ),
 		});
 		this.recorder = new HitRecorder(() => this.state, hit => this.onHit(hit));
+		if (opts.ownTeam.some(s => /^Zoroark/.test(s.species))) {
+			this.ownIllusion = new IllusionTracker({ side: opts.side === 'p1' ? 'p2' : 'p1', format: this.format, prior: this.prior, broughtOrder: opts.ownOrder });
+		}
 	}
 
 	get state() { return this.illusion.parser.state; }
@@ -115,10 +126,12 @@ export class OpponentModel {
 	}
 
 	private splitSide: SideId | null = null;
+	private feedOwn(line: string) { this.ownIllusion?.feed(line); }
 	private splitSkip = 0;
 
 	feed(rawLine: string): void {
 		const line = rawLine.replace(/\r$/, '');
+		this.feedOwn(line);
 		// Omniscient logs: only look at the line the parser will use (as IllusionTracker does).
 		if (line.startsWith('|split|')) { this.splitSide = line.slice(7) as SideId; this.illusion.feed(line); return; }
 		if (this.splitSide) {
@@ -129,6 +142,52 @@ export class OpponentModel {
 		} else if (this.splitSkip > 0) { this.splitSkip--; this.illusion.feed(line); return; }
 		this.recorder.before(line);
 		this.illusion.feed(line);
+	}
+
+	/**
+	 * The state with our own disguised Zoroark shown as itself (the log shows its disguise). Uses the
+	 * disguise rule on our known party order; the parser already catches it when exact HP gives it away.
+	 */
+	withOwnZoroark(state: KnownBattleState, known?: { slot: number; isZoroark: boolean }[]): KnownBattleState {
+		const tracker = this.ownIllusion;
+		if (!tracker) return state;
+		const mine: SideId = this.side === 'p1' ? 'p2' : 'p1';
+		// What the log implies; `known` (what we actually did) overrides it.
+		const report = { slots: tracker.report().slots.map(s => {
+			const k = known?.find(x => x.slot === s.slot);
+			return k ? { ...s, pZoroark: k.isZoroark ? 1 : 0 } : s;
+		}) };
+		const zoroark = this.opts.ownTeam.find(s => /^Zoroark/.test(s.species));
+		if (!zoroark) return state;
+		let out = state;
+		for (const s of report.slots) {
+			const ident = state.sides[mine].active[s.slot];
+			const mon = state.sides[mine].pokemon.find(p => p.ident === ident);
+			if (!ident || !mon || /^Zoroark/.test(mon.species) || s.pZoroark < 1 - CLEAR) continue;
+			out = structuredClone(out);
+			const side = out.sides[mine];
+			const shown = side.pokemon.find(p => p.ident === ident)!;
+			const zIdent = `${mine}: ${zoroark.name}`;
+			// Our Zoroark is the one in this slot; any record the parser kept under its real name is stale.
+			side.pokemon = side.pokemon.filter(p => p === shown || p.ident !== zIdent);
+			const base = ident.replace(/#illusion$/, '');
+			// The real Pokémon it copied (if also out) may sit under a placeholder name: give it its own back.
+			const placeholder = side.pokemon.find(p => p !== shown && p.ident === `${base}#illusion`);
+			const sp = this.format.dex.species.get(zoroark.species).name;
+			Object.assign(shown, { ident: zIdent, name: zoroark.name, species: sp, teamSpecies: sp, permanentSpecies: sp, ability: 'illusion', baseAbility: 'illusion', disguise: shown.name });
+			if (placeholder) {
+				placeholder.ident = base;
+				placeholder.ability = undefined;
+				placeholder.baseAbility = undefined;
+			}
+			side.active = side.active.map(a => (a === ident ? zIdent : a === `${base}#illusion` ? base : a));
+		}
+		return out;
+	}
+
+	/** Chance that each of our active Pokémon is our own Zoroark in disguise, from the log alone. */
+	ownZoroarkOdds(): { slot: number; shown?: string; pZoroark: number }[] {
+		return this.ownIllusion?.report().slots ?? [];
 	}
 
 	/** Call at the end of a log that stops mid-turn, to score that turn's hits too. */
