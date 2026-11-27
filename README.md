@@ -26,6 +26,21 @@ After pulling new changes, run `npm install` again, plus `npm run setup` if the 
 changed. If `npm test` says setup isn't finished, it tells you which step is missing.
 (`'vitest' is not recognized` means `npm install` hasn't been run in this folder.)
 
+## Practice against the engine
+
+1. Start a local Showdown server (first start takes a minute): `npm run server`
+2. In a second terminal, start the engine with the team it should play (Showdown export format):
+   `npm run practice -- --team their-team.txt`
+   (optional: `--bring "A,B,C,D"` to fix its four and their order, `--name`, `--threads N`)
+3. Open http://localhost:8000 in your browser. It opens the normal Showdown client connected to your
+   server. Pick any name (no password needed), import your team in the teambuilder, and challenge
+   **EngineBot** to **[Gen 9 Champions] VGC 2026 Reg M-C** — single game or Bo3.
+
+It plays from what a player would know (it never sees your sets), remembers what you revealed in
+earlier games of a Bo3, and prints its reasoning for each turn in its terminal. Ignore the Open Team
+Sheets prompt (it never accepts). Teams in the browser on `localhost.psim.us` are stored separately
+from your main Showdown account, so import them there once.
+
 ## Commands
 
 | Command | What it does |
@@ -38,6 +53,8 @@ changed. If `npm test` says setup isn't finished, it tells you which step is mis
 | `npm run parse-log -- examples/sample-battle.log --turn 4` | Show what a player knows at a point in a battle (log, replay JSON or saved replay HTML; `--as p1`, `--json`) |
 | `npm run parse-log -- replay.html --as p1 --team my-team.txt --turn 5` | Same, plus the chance each opposing Pokémon is a disguised Zoroark (when one is in their preview) |
 | `npm run advise -- replay.html --as p1 --team my-team.txt --turn 5` | Recommended play for a turn (a mixed strategy), what they're likely to do, Illusion odds, and their likely sets. Optional `--bring "A,B,C,D"` (in the order you picked them; also lets it see through your own Zoroark), `--zoroark a\|b\|none` (which slot is your Zoroark, when the log can't tell), `--their-roster rosters.json:b`, `--samples N --keep N`, `--threads N` (default: all hardware threads but one) |
+| `npm run server` | Local Showdown server on port 8000 (no passwords), for practice games |
+| `npm run practice -- --team their-team.txt` | The engine as a Showdown bot ("EngineBot") that accepts challenges on the local server; see above |
 | `npm run arena -- 20 [--vs greedy] [--jobs N]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams); `--jobs` games at a time on worker threads (default: all threads but one) |
 | `npm run fetch-usage` | Download Smogon usage stats for the format (priors for opponents' sets) into `data/usage/` |
 | `npm run check-illusion -- 300` | Check Illusion inference against simulator truth over many battles |

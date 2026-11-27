@@ -30,6 +30,9 @@ export const TeamValidator = PS.TeamValidator;
 export type TeamValidator = PST.TeamValidator;
 export const toID = PS.toID;
 export const Pokemon = PS.Pokemon;
+/** Showdown's streaming battle interface (what a server runs): for end-to-end tests of the bot. */
+export const BattleStream = PS.BattleStream;
+export const getPlayerStreams = PS.getPlayerStreams;
 export type Pokemon = PST.Pokemon;
 export type Side = PST.Side;
 
