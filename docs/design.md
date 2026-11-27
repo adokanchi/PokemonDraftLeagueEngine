@@ -1,4 +1,4 @@
-# Draft League Engine — Spec & Design (v5)
+# Draft League Engine — Spec & Design (v6)
 
 _Last updated: 2026-11-26. Repo: https://github.com/adokanchi/PokemonDraftLeagueEngine_
 
@@ -110,9 +110,30 @@ Ladder usage is **not** the prior. Draft coaches tech against the specific oppos
 
 ### 5.4 Belief engine
 - Particle filter over the opponent's **full team configuration**: six sets jointly (item clause), which 4 were brought, which 2 are in the back, Mega status.
+- **Illusion inference — built (P1)**, `src/belief/illusion.ts`, details in §5.4.1.
 - Hard evidence: reveals, explicit exclusions, item clause, Mega designation, legality, knowledge from earlier games in the set (from 5.1's knowledge module).
 - Soft evidence: damage vs predicted ranges (using Champions' floor-percent HP display and its 50%/20% hints), speed order, abilities/items that did or didn't trigger, how likely their move choices were under each hypothesis.
 - **Rejuvenation:** when evidence falls outside the current hypotheses (a surprise tech), generate new hypotheses consistent with all evidence, drawn from the open-world space.
+
+#### 5.4.1 Illusion (Zoroark / Zoroark-Hisui)
+Active only when a Zoroark is in their team preview. For each opposing Pokémon on the field it gives P(it is Zoroark).
+- **Exact structure, following Showdown's rules.** The hidden state covers which 4 of the 6 were brought and in what order (360 options) and which benched Pokémon came in at each switch. Showdown's disguise rule decides what each hypothesis would show: on switch-in, Zoroark copies the last non-fainted party member after its own position. Every hypothesis that reproduces what was shown survives. This alone covers:
+  - "the real one came in while its copy was already out";
+  - a lead Zoroark can only copy a Pokémon in their back;
+  - 4 different species seen means Zoroark wasn't brought;
+  - a Pokémon that "fainted" and later reappears must have been Zoroark.
+- **Evidence while each Pokémon is out**, as likelihoods per hypothesis:
+  - Moves: one the shown species can't learn but Zoroark can (Whimsicott using Bitter Malice) is certain. One it rarely runs is graded by the usage prior. A fifth distinct move rules a species out.
+  - Abilities: any revealed ability means it's real, since Zoroark only has Illusion. A switch-in with **no** ability message counts against species whose abilities announce: Tyranitar's Sand Stream and Unnerve both always announce, so a silent Tyranitar is certain to be Zoroark. Which abilities announce on switch-in is *measured from the simulator* (`src/belief/announce.ts`), with exceptions for weather/terrain already up and Supersweet Syrup's first-entry-only behaviour.
+  - Turn order: possible speeds come from base stats, stat points, nature, boosts, Scarf/Iron Ball, weather and terrain abilities, Tailwind, paralysis and Trick Room. Priority modifiers include Prankster, Gale Wings, Triage, Grassy Glide and Stall. Your own Pokémon use exact stats. Examples: Torkoal outspeeding a max-speed Sneasler is certain to be Zoroark. A Whimsicott Taunting after a +0 move is likely Zoroark, with the non-Prankster chance kept.
+  - Types: our status/attack moves vs its types (Toxic failing on a "Kingambit" means real; Will-O-Wisp burning a "Torkoal" means Zoroark). Also sandstorm chip.
+  - HP/status continuity: coming back with more HP than it left with, without possible Regenerator, means Zoroark. Same for losing a status without Natural Cure.
+  - Items: item clause, items known from earlier games in the set, drafted Mega stones.
+  - Mega Evolution, or taking an attack without the disguise breaking, means real.
+- "Model says impossible" uses a likelihood of 1e-6 rather than 0, so a model gap can't wipe out every hypothesis; true contradictions are logged and skipped.
+- **Validated against the simulator**: across 1,000 random battles where the opponent has a Zoroark (~23k slot checks), **0 wrong "certain" calls** (P > 0.999 or < 0.001), and well calibrated (Brier 0.02 vs 0.11 for the base rate). `npm run check-illusion` reruns this.
+- Priors: `src/data/priors.ts`. With no usage file, every legal ability, item and move is equally likely, so the "rarely runs that move / that ability" evidence is weak. `npm run fetch-usage` downloads Smogon usage for the format into `data/usage/`, and it is then blended with a 3% open-world floor.
+- Not yet used: damage dealt *by* the suspected Zoroark (STAB and stats via damage calcs), and Grassy Terrain healing.
 
 ### 5.5 Turn solver (Goal 3)
 1. Prune each side's actions to plausible ones (heuristic or policy prior).
@@ -142,7 +163,7 @@ Ladder usage is **not** the prior. Draft coaches tech against the specific oppos
 ## 6. Build order
 
 - **P0 Foundations — done except data ingest:** repo, pinned Showdown + in-process sim harness, legal-choice enumeration, benchmark script, draft validator, battle-state schema + Showdown log parser + Bo3 knowledge. Data ingest (usage stats, replays) moved to P3/P4, where it's first needed.
-- **P1 Goal 3 v0:** belief tracker v0 (hard evidence) + heuristic one-turn matrix solver + bot-vs-bot harness. Milestone: beats simple baselines; sensible advice on hand-built states.
+- **P1 Goal 3 v0:** belief tracker v0 (hard evidence) + heuristic one-turn matrix solver + bot-vs-bot harness. Milestone: beats simple baselines; sensible advice on hand-built states. *Done so far: Illusion inference (§5.4.1), usage-prior plumbing, turn-order/speed model.*
 - **P1b Practice mode:** engine as a bot on a local Showdown server.
 - **P2 Goal 2 v0:** preview solver from P1 simulations.
 - **P3 Goal 1 v0:** set generator (5.3 layer 2) + spread tuning + teambuilder on shortlisted teams; team strength and variant deltas.
@@ -152,7 +173,7 @@ Ladder usage is **not** the prior. Draft coaches tech against the specific oppos
 
 ## 7. Environment & decisions
 
-- **Hardware:** user's PC: Ryzen 7 7800X3D (8 cores/16 threads), RTX 4070 (12 GB), 32 GB DDR5. Enough for P0–P4 and modest P5. In P5 the bottleneck is CPU simulation, not GPU. If more is needed: a faster sim port first, renting many-core CPU machines second.
+- **Hardware:** user's PC: Ryzen 7 7800X3D (8 cores/16 threads), RTX 4070 (12 GB), 32 GB DDR5. Temporarily a laptop (Ryzen 7 7730U, 16 GB): fine for development and tests; benchmarks there won't reflect the desktop. Enough for P0–P4 and modest P5. In P5 the bottleneck is CPU simulation, not GPU. If more is needed: a faster sim port first, renting many-core CPU machines second.
 - **Stack:** TypeScript/Node 22 core with Showdown's simulator in-process; vitest for tests; tsx to run scripts. Python/PyTorch only for network training (P4+), with models exported for inference in Node.
 - **Repo:** https://github.com/adokanchi/PokemonDraftLeagueEngine. Showdown is a pinned git submodule at `vendor/pokemon-showdown`; `npm run setup` builds it.
 
