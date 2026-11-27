@@ -29,6 +29,7 @@ export const Teams = PS.Teams;
 export const TeamValidator = PS.TeamValidator;
 export type TeamValidator = PST.TeamValidator;
 export const toID = PS.toID;
+export const Pokemon = PS.Pokemon;
 export type Pokemon = PST.Pokemon;
 export type Side = PST.Side;
 

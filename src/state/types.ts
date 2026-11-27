@@ -63,6 +63,9 @@ export interface MonState {
 	transformedInto?: string;
 	/** Revealed moves (by id) with how many times each was used. */
 	moves: Record<string, { uses: number }>;
+	/** Last move it selected itself (not called by another move), and the turn it was used. */
+	lastMove?: string;
+	lastMoveTurn?: number;
 	/** Ability it was revealed to have (current). */
 	ability?: string;
 	/** Base (team sheet) ability, when we can tell it apart from a changed one. */

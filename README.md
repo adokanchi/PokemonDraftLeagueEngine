@@ -4,9 +4,10 @@ An analysis and practice engine for Pokémon Champions VGC draft league matches,
 Pokémon Showdown. Goals: team construction, team preview, and move evaluation. The design is
 in [docs/design.md](docs/design.md).
 
-**Status:** foundations (P0) done; P1 in progress. The simulator harness, legal-move enumeration,
-draft-rule validator, battle-log parser, benchmark and **Illusion (Zoroark) inference** are working
-and tested. The turn solver is next.
+**Status:** P0 and a first version of P1 are done: simulator harness, draft-rule validator,
+battle-log parser, Illusion inference, opponent set tracking (including damage-based inference)
+and a **one-turn solver** you can ask for advice on any turn of a real battle. Next: faster
+(parallel) search, practice mode, and the team-preview solver.
 
 ## Setup
 
@@ -36,6 +37,8 @@ changed. If `npm test` says setup isn't finished, it tells you which step is mis
 | `npm run check-parser -- 1000` | Deep check of the log parser against simulator truth over many random battles |
 | `npm run parse-log -- examples/sample-battle.log --turn 4` | Show what a player knows at a point in a battle (log, replay JSON or saved replay HTML; `--as p1`, `--json`) |
 | `npm run parse-log -- replay.html --as p1 --team my-team.txt --turn 5` | Same, plus the chance each opposing Pokémon is a disguised Zoroark (when one is in their preview) |
+| `npm run advise -- replay.html --as p1 --team my-team.txt --turn 5` | Recommended play for a turn (a mixed strategy), what they're likely to do, Illusion odds, and their likely sets. Optional `--bring "A,B,C,D"`, `--their-roster rosters.json:b`, `--samples N --keep N` |
+| `npm run arena -- 20 [--vs greedy]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams) |
 | `npm run fetch-usage` | Download Smogon usage stats for the format (priors for opponents' sets) into `data/usage/` |
 | `npm run check-illusion -- 300` | Check Illusion inference against simulator truth over many battles |
 
