@@ -480,7 +480,9 @@ export class BattleLogParser {
 		// What the current move did: hits taken (Rage Fist), and whether it worked at all.
 		if (this.cur) {
 			// (Psychic Terrain stopping a priority move is a failure; Protect blocking isn't, as in Showdown.)
-			const ability = cmd === '-ability' && !tags.from ? toID(args[1] ?? '') : /^ability:/i.test(args[1] ?? '') && ['-activate', '-start'].includes(cmd) ? toID(effectOf(args[1])!.name) : '';
+			// (Water Absorb, Volt Absorb, Earth Eater show only as a heal "[from] ability: X".)
+			const healedBy = cmd === '-heal' && /^ability:/i.test(tags.from ?? '') ? toID(effectOf(tags.from)!.name) : '';
+			const ability = healedBy ? healedBy : cmd === '-ability' && !tags.from ? toID(args[1] ?? '') : /^ability:/i.test(args[1] ?? '') && ['-activate', '-start'].includes(cmd) ? toID(effectOf(args[1])!.name) : '';
 			if (target && target !== this.cur.user && ABSORBING.has(ability) && this.cur.targets.has(target)) {
 				this.cur.absorbed.add(target);
 				this.cur.failed = true;
@@ -495,7 +497,9 @@ export class BattleLogParser {
 			const abilityBoost = (cmd === '-boost' || cmd === '-unboost') && !!target && this.cur.abilityBoosting === target;
 			if (cmd === '-ability' && args[2] === 'boost') this.cur.abilityBoosting = target;
 			else if (cmd !== '-boost' && cmd !== '-unboost') this.cur.abilityBoosting = undefined;
-			if ((FAILURE_LINES.has(cmd) && !healStillWorked) || noChange || (cmd === '-activate' && toID(args[1] ?? '') === 'movepsychicterrain')) this.cur.failed = true;
+			// "-fail|X|move: Double Shock" (the move's own precondition: Double Shock, Burn Up...) isn't a failure in Showdown either.
+			const ownCheck = cmd === '-fail' && toID(effectOf(args[1])?.name ?? '') === this.cur.id;
+			if ((FAILURE_LINES.has(cmd) && !healStillWorked && !ownCheck) || noChange || (cmd === '-activate' && toID(args[1] ?? '') === 'movepsychicterrain')) this.cur.failed = true;
 			else if (abilityBoost) { /* not the move */ }
 			// Effects on what the move reached (or on the field), but not Protean/Libero changing the
 			// user's type before it can miss, and not end-of-turn effects.

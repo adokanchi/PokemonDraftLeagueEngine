@@ -177,6 +177,8 @@ export function fits(o: HitObservation, r: { min: number; max: number; maxHp: nu
 	// Percentages are floor(100 × HP / max HP) before and after, so a loss is within ±1 point.
 	const scale = o.exact ? 1 : 100 / r.maxHp;
 	const slack = o.exact ? 0 : 1.01;
-	const lo = r.min * scale - slack, hi = r.max * scale + slack;
+	// Champions never shows a living Pokémon below 1%: "→ 1%" can hide a drop to just above 0%.
+	const shownOne = !o.exact && o.before - o.lost === 1;
+	const lo = r.min * scale - slack - (shownOne ? 1 : 0), hi = r.max * scale + slack;
 	return o.atLeast ? hi >= o.lost : o.lost >= lo && o.lost <= hi;
 }
