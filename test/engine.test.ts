@@ -11,6 +11,7 @@ import { UniformPrior } from '../src/data/priors.js';
 import { solveTurn } from '../src/engine/solver.js';
 import { SolverBot, translateChoice } from '../src/engine/bots.js';
 import { randomBattle, randomTeam } from './helpers.js';
+import { teamWithZoroark } from './zoroark-helpers.js';
 import { compareReconstruction } from './reconstruct-check.js';
 
 const prior = new UniformPrior();
@@ -47,6 +48,30 @@ describe('rebuilding battles from what a player knows', () => {
 		}
 		expect(checks).toBeGreaterThan(150);
 		expect(bad / checks, examples.join("\n")).toBeLessThan(0.02);
+	});
+});
+
+describe('our own Zoroark', () => {
+	it('is seen through (from exact HP, or the disguise rule on our party order) when rebuilding', () => {
+		let checks = 0, bad = 0;
+		const examples: string[] = [];
+		for (let seed = 1; seed <= 20; seed++) {
+			const b = createBattle({ p1: { name: 'A', team: teamWithZoroark(seed * 2 + 1) }, p2: { name: 'B', team: randomTeam(seed * 2 + 2) }, seed, keepLog: true });
+			const rng = makeRng(seed);
+			let ownOrder: string[] | undefined;
+			while (!b.ended && b.turn < 20) {
+				if (!ownOrder && b.turn >= 1) ownOrder = b.sides[0]!.pokemon.slice(0, 4).map(p => p.set.species);
+				const pend = sidesNeedingChoice(b);
+				if (pend.length === 2 && b.turn > 0 && !b.sides.some(s => s.activeRequest?.forceSwitch)) {
+					checks++;
+					const problems = compareReconstruction(b, { ownOrder });
+					if (problems.length) { bad++; if (examples.length < 5) examples.push(`seed ${seed}: ${problems[0]}`); }
+				}
+				for (const s of pend) { const o = legalChoices(b, s); submit(b, s, o[Math.floor(rng() * o.length)]!); if (b.ended) break; }
+			}
+		}
+		expect(checks).toBeGreaterThan(100);
+		expect(bad / checks, examples.join('\n')).toBeLessThan(0.03);
 	});
 });
 

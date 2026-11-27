@@ -7,7 +7,9 @@
  *   --as p1|p2         which side you were (required)
  *   --team FILE        your full team in Showdown export format (required)
  *   --turn N           the turn to decide (default: the last turn in the log)
- *   --bring "A,B,C,D"  the four you brought, if not all have appeared yet
+ *   --bring "A,B,C,D"  the four you brought, in the order you picked them (leads first); needed
+ *                      to see through your own Zoroark's disguise, and if not all have appeared
+ *   --zoroark a|b|none which of your active slots is your Zoroark right now, if the log can't tell
  *   --their-roster FILE[:key]  their roster (JSON/txt) so drafted Mega stones are known
  *   --samples N --keep N       search budget (defaults 6 and 12; larger = slower, steadier)
  */
@@ -22,7 +24,7 @@ import type { SideId } from '../src/state/types.js';
 
 const args = process.argv.slice(2);
 const opt = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
-const valueFlags = new Set(['--as', '--team', '--turn', '--bring', '--their-roster', '--samples', '--keep']);
+const valueFlags = new Set(['--as', '--team', '--turn', '--bring', '--their-roster', '--samples', '--keep', '--zoroark']);
 const file = args.find((a, i) => !a.startsWith('--') && !valueFlags.has(args[i - 1] ?? ''));
 const me = opt('as') as SideId | undefined;
 const teamFile = opt('team');
@@ -43,7 +45,9 @@ if (rosterSpec) {
 	for (const e of parseRoster(names).entries) if (e.isMega && e.megaStone) megaStones[e.teamSpecies] = e.megaStone;
 }
 
-const model = new OpponentModel({ side: them, ownTeam, megaStones });
+// --bring in the order you picked them (leads first) also lets it see through your own Zoroark.
+const ownOrder = opt('bring')?.split(',').map(s => s.trim()).map(n => ownTeam.find(t => toID(t.species) === toID(n) || toID(t.name) === toID(n))?.species ?? n);
+const model = new OpponentModel({ side: them, ownTeam, megaStones, ownOrder });
 const log = extractLog(readFileSync(file, 'utf8')).split('\n');
 const turnArg = opt('turn');
 const lastTurn = Math.max(0, ...log.filter(l => l.startsWith('|turn|')).map(l => Number(l.slice(6))));
@@ -68,7 +72,16 @@ for (const id of [...seen, ...(bringNames ?? []), ...ownTeam.map(s => toID(s.spe
 const samples = Number(opt('samples') ?? 6);
 const keep = Number(opt('keep') ?? 12);
 console.log(`Turn ${turn}: thinking (${samples} guesses of their team, up to ${keep} options per side)...`);
-const res = solveTurn({ state, me, myTeam, model, options: { samples, keep } });
+const zArg = opt('zoroark');
+const ownZoroark = zArg ? [0, 1].map(slot => ({ slot, isZoroark: zArg === 'ab'[slot] })) : undefined;
+if (!zArg) {
+	for (const s of model.ownZoroarkOdds()) {
+		if (s.pZoroark > 0.05 && s.pZoroark < 0.95) {
+			console.log(`Can't tell from the log whether your ${s.shown} in slot ${'ab'[s.slot]} is your Zoroark (${(100 * s.pZoroark).toFixed(0)}%). Assuming it isn't; pass --zoroark ${'ab'[s.slot]} if it is.`);
+		}
+	}
+}
+const res = solveTurn({ state, me, myTeam, model, options: { samples, keep }, ownZoroark });
 
 console.log(`\nRecommended (expected score ${res.value.toFixed(2)} on a -1..+1 scale):`);
 for (const o of res.options.filter(o => o.p >= 0.02)) console.log(`  ${(100 * o.p).toFixed(0).padStart(3)}%  ${o.label}`);

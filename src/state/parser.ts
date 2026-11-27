@@ -35,6 +35,11 @@ export interface ParseOptions {
 	onEvent?: (e: ParserEvent) => void;
 	/** Keep this player's private `|split|` lines (their exact HP etc.). */
 	perspective?: SideId;
+	/**
+	 * Our own team (the `perspective` side), with each Pokémon's max HP. Lets the parser see
+	 * through our own Zoroark's disguise: the log names the disguise, but shows our exact HP.
+	 */
+	ownTeam?: { name: string; species: string; maxHp: number }[];
 	/** Stop when this turn starts (state = what you know when choosing your turn-N move). */
 	stopAtTurn?: number;
 	format?: ResolvedFormat;
@@ -175,7 +180,7 @@ export class BattleLogParser {
 		// Resolve by position when given: an Illusion user can share a name with its ally.
 		if (pos.slot !== null) {
 			const here = side.pokemon.find(p => p.ident === side.active[pos.slot!]);
-			if (here && here.name === pos.name) return here;
+			if (here && (here.name === pos.name || here.disguise === pos.name)) return here;
 		}
 		return side.pokemon.find(p => p.ident === pos.ident);
 	}
@@ -318,7 +323,13 @@ export class BattleLogParser {
 		}
 		const existing = side.pokemon.find(p => p.ident === pos.ident);
 		let mon: MonState;
-		if (existing && existing.activeSlot !== null && existing.activeSlot !== slot) {
+		const own = this.ownZoroark(pos.side, details, hp);
+		if (own) {
+			// Our own Zoroark in disguise: we know it's ours from its HP.
+			mon = own;
+			mon.disguise = pos.name;
+			this.snapshots[pos.side][slot] = { before: null };
+		} else if (existing && existing.activeSlot !== null && existing.activeSlot !== slot) {
 			// The same Pokémon can't be in two slots: this is an Illusion user disguised as its ally.
 			mon = this.illusionPlaceholder(pos.side, pos.ident, pos.name, details);
 			this.snapshots[pos.side][slot] = { before: null };
@@ -328,9 +339,12 @@ export class BattleLogParser {
 			mon = this.getOrCreate(position, details);
 		}
 		const d = this.parseDetails(details);
-		mon.species = d.species;
-		mon.permanentSpecies = d.species;
-		mon.level = d.level;
+		if (!own) {
+			mon.species = d.species;
+			mon.permanentSpecies = d.species;
+			mon.level = d.level;
+			mon.disguise = undefined;
+		}
 		mon.seen = true;
 		mon.activeSlot = slot;
 		mon.switchedInTurn = this.state.turn;
@@ -348,6 +362,31 @@ export class BattleLogParser {
 			}
 			this.batonPass[pos.side][slot] = undefined;
 		}
+	}
+
+	/** The switch-in is our own Zoroark if the shown max HP is our Zoroark's and not the named Pokémon's. */
+	private ownZoroark(side: SideId, details: string, hp: string | undefined): MonState | undefined {
+		const team = this.opts.ownTeam;
+		if (!team || side !== this.perspective) return undefined;
+		const max = Number(/^\d+\/(\d+)/.exec(hp ?? '')?.[1]);
+		if (!max) return undefined;
+		const shown = this.parseDetails(details).species;
+		const named = team.find(t => t.species === shown || this.format.dex.species.get(t.species).name === shown);
+		if (named && named.maxHp === max) return undefined;
+		const zoroark = team.find(t => this.format.dex.species.get(t.species).baseSpecies === 'Zoroark' && t.maxHp === max);
+		if (!zoroark) return undefined;
+		const ident = `${side}: ${zoroark.name}`;
+		let mon = this.state.sides[side].pokemon.find(p => p.ident === ident);
+		if (!mon) {
+			const sp = this.format.dex.species.get(zoroark.species).name;
+			mon = {
+				ident, side, name: zoroark.name, species: sp, teamSpecies: sp, permanentSpecies: sp, level: 50, gender: '',
+				hp: max, maxHp: max, status: '', boosts: {}, volatiles: {}, fainted: false,
+				activeSlot: null, seen: false, megaEvolved: false, moves: {}, item: { swapped: false }, ability: 'illusion', baseAbility: 'illusion',
+			};
+			this.state.sides[side].pokemon.push(mon);
+		}
+		return mon;
 	}
 
 	private illusionPlaceholder(side: SideId, ident: string, name: string, details: string): MonState {
@@ -411,6 +450,7 @@ export class BattleLogParser {
 		real.seen = true;
 		real.activeSlot = slot;
 		real.ability = 'illusion';
+		real.disguise = undefined;
 		real.baseAbility ??= 'illusion';
 		side.active[slot] = real.ident;
 	}
@@ -418,6 +458,7 @@ export class BattleLogParser {
 	private switchOut(mon: MonState) {
 		this.releaseTrapsBy(mon);
 		mon.activeSlot = null;
+		mon.disguise = undefined;
 		// Temporary formes (Stance Change, Hunger Switch, Transform...) revert on switching out.
 		mon.transformedInto = undefined;
 		if (mon.permanentSpecies) mon.species = mon.permanentSpecies;
@@ -480,7 +521,9 @@ export class BattleLogParser {
 		// What the current move did: hits taken (Rage Fist), and whether it worked at all.
 		if (this.cur) {
 			// (Psychic Terrain stopping a priority move is a failure; Protect blocking isn't, as in Showdown.)
-			const ability = cmd === '-ability' && !tags.from ? toID(args[1] ?? '') : /^ability:/i.test(args[1] ?? '') && ['-activate', '-start'].includes(cmd) ? toID(effectOf(args[1])!.name) : '';
+			// (Water Absorb, Volt Absorb, Earth Eater show only as a heal "[from] ability: X".)
+			const healedBy = cmd === '-heal' && /^ability:/i.test(tags.from ?? '') ? toID(effectOf(tags.from)!.name) : '';
+			const ability = healedBy ? healedBy : cmd === '-ability' && !tags.from ? toID(args[1] ?? '') : /^ability:/i.test(args[1] ?? '') && ['-activate', '-start'].includes(cmd) ? toID(effectOf(args[1])!.name) : '';
 			if (target && target !== this.cur.user && ABSORBING.has(ability) && this.cur.targets.has(target)) {
 				this.cur.absorbed.add(target);
 				this.cur.failed = true;
@@ -495,7 +538,9 @@ export class BattleLogParser {
 			const abilityBoost = (cmd === '-boost' || cmd === '-unboost') && !!target && this.cur.abilityBoosting === target;
 			if (cmd === '-ability' && args[2] === 'boost') this.cur.abilityBoosting = target;
 			else if (cmd !== '-boost' && cmd !== '-unboost') this.cur.abilityBoosting = undefined;
-			if ((FAILURE_LINES.has(cmd) && !healStillWorked) || noChange || (cmd === '-activate' && toID(args[1] ?? '') === 'movepsychicterrain')) this.cur.failed = true;
+			// "-fail|X|move: Double Shock" (the move's own precondition: Double Shock, Burn Up...) isn't a failure in Showdown either.
+			const ownCheck = cmd === '-fail' && toID(effectOf(args[1])?.name ?? '') === this.cur.id;
+			if ((FAILURE_LINES.has(cmd) && !healStillWorked && !ownCheck) || noChange || (cmd === '-activate' && toID(args[1] ?? '') === 'movepsychicterrain')) this.cur.failed = true;
 			else if (abilityBoost) { /* not the move */ }
 			// Effects on what the move reached (or on the field), but not Protean/Libero changing the
 			// user's type before it can miss, and not end-of-turn effects.

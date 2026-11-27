@@ -108,6 +108,8 @@ export interface MonState {
 	baseAbility?: string;
 	/** Its ability has been changed this battle (Skill Swap, Trace, Mummy, ...): `ability` may not be its own. */
 	abilityChanged?: boolean;
+	/** Our own Zoroark, out under this disguise (the name the log shows for it). */
+	disguise?: string;
 	/** Skill Swap between allies hides the abilities: it now has this Pokémon's (ident) ability. */
 	abilityFrom?: string;
 	item: ItemKnowledge;
