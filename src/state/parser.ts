@@ -13,7 +13,15 @@ const BOOSTS: BoostId[] = ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasi
 const ITEM_SWAP_MOVES = new Set(['trick', 'switcheroo', 'thief', 'covet', 'bestow', 'fling']);
 const TERRAINS = new Set(['electricterrain', 'grassyterrain', 'mistyterrain', 'psychicterrain']);
 
+/** Reveals the parser attributes to a Pokémon, as they happen (for belief tracking). */
+export type ParserEvent =
+	| { type: 'ability'; mon: MonState; ability: string }
+	| { type: 'item'; mon: MonState; item: string; how: 'held' | 'lost' }
+	| { type: 'move'; mon: MonState; move: string };
+
 export interface ParseOptions {
+	/** Called whenever an ability/item/move is revealed for a Pokémon (repeats included). */
+	onEvent?: (e: ParserEvent) => void;
 	/** Keep this player's private `|split|` lines (their exact HP etc.). */
 	perspective?: SideId;
 	/** Stop when this turn starts (state = what you know when choosing your turn-N move). */
@@ -205,6 +213,7 @@ export class BattleLogParser {
 	private revealAbility(mon: MonState | undefined, ability: string, base = true) {
 		if (!mon) return;
 		const id = toID(ability);
+		this.opts.onEvent?.({ type: 'ability', mon, ability: id });
 		mon.ability = id;
 		if (base && !mon.baseAbility && !mon.megaEvolved && !mon.transformedInto && !mon.abilityChanged) mon.baseAbility = id;
 	}
@@ -214,6 +223,7 @@ export class BattleLogParser {
 		const id = toID(item);
 		// "[from] item: Sitrus Berry" right after eating it: already accounted for.
 		if (mon.item.current === '' && mon.item.lostItem === id) return;
+		if (!mon.item.swapped) this.opts.onEvent?.({ type: 'item', mon, item: id, how: 'held' });
 		mon.item.current = id;
 		mon.item.lostVia = undefined;
 		if (!mon.item.swapped && mon.item.original === undefined) mon.item.original = id;
@@ -222,6 +232,7 @@ export class BattleLogParser {
 	private loseItem(mon: MonState | undefined, item: string, via: NonNullable<MonState['item']['lostVia']>) {
 		if (!mon) return;
 		const id = toID(item);
+		if (!mon.item.swapped) this.opts.onEvent?.({ type: 'item', mon, item: id, how: 'lost' });
 		if (!mon.item.swapped && mon.item.original === undefined) mon.item.original = id;
 		mon.item.current = '';
 		mon.item.lostVia = via;
@@ -250,7 +261,9 @@ export class BattleLogParser {
 		if (eff.kind === 'ability') {
 			// "[from] ability: X|[of] Y" normally means Y's ability; for -heal (Water Absorb etc.)
 			// [of] is the attacker and the ability is the healed Pokémon's.
-			owner = cmd === '-heal' ? (target ?? of) : (of ?? target);
+			// (Hospitality heals an ally "[of] holder", so a same-side [of] owns it.)
+			const sameSide = !!of && !!target && of.side === target.side && of !== target;
+			owner = cmd === '-heal' && !sameSide ? (target ?? of) : (of ?? target);
 			if (owner && !this.canHaveAbility(owner, eff.name)) {
 				const other = owner === target ? of : target;
 				// Neither can legally have it (e.g. a copied ability): don't guess.
@@ -337,7 +350,7 @@ export class BattleLogParser {
 			otherPlaceholder.ability = undefined;
 			otherPlaceholder.baseAbility = undefined;
 			shown.ident = `${shown.ident}#illusion`;
-			side.active[otherPlaceholder.activeSlot ?? 0] = otherPlaceholder.ident;
+			if (otherPlaceholder.activeSlot !== null) side.active[otherPlaceholder.activeSlot] = otherPlaceholder.ident;
 			side.active[slot] = shown.ident;
 		}
 		if (shown?.ident.endsWith('#illusion')) {
@@ -388,7 +401,7 @@ export class BattleLogParser {
 		const cmd = parts[0] ?? '';
 		const { args, tags } = splitTags(parts.slice(1));
 		const st = this.state;
-		const target = (cmd.startsWith('-') || ['move', 'cant', 'faint', 'detailschange'].includes(cmd)) ? this.mon(args[0]) : undefined;
+		const target = (cmd.startsWith('-') || ['move', 'cant', 'faint', 'detailschange', 'swap'].includes(cmd)) ? this.mon(args[0]) : undefined;
 
 		switch (cmd) {
 		case 'player': {
@@ -456,6 +469,7 @@ export class BattleLogParser {
 				const id = toID(moveName);
 				user.moves[id] ??= { uses: 0 };
 				user.moves[id]!.uses++;
+				this.opts.onEvent?.({ type: 'move', mon: user, move: id });
 			}
 			if (from.toLowerCase().startsWith('ability:')) {
 				const eff = effectOf(from)!;
@@ -714,7 +728,25 @@ export class BattleLogParser {
 			this.attributeFrom(cmd, target, tags);
 			break;
 		}
+		case 'swap': {
+			// Ally Switch etc.: "|swap|p2a: X|1" moves X to slot 1 and the ally to X's old slot.
+			const pos = this.parsePosition(args[0]!);
+			const side = st.sides[pos.side];
+			const from = pos.slot ?? side.active.indexOf(target?.ident ?? '');
+			const to = Number(args[1]);
+			if (from < 0 || Number.isNaN(to) || from === to) break;
+			const a = side.active[from] ?? null;
+			const b = side.active[to] ?? null;
+			side.active[from] = b;
+			side.active[to] = a;
+			for (const m of side.pokemon) {
+				if (m.ident === a) m.activeSlot = to;
+				else if (m.ident === b) m.activeSlot = from;
+			}
+			break;
+		}
 		case '-transform': {
+			this.attributeFrom(cmd, target, tags);
 			const into = this.mon(args[1]);
 			if (target && into) {
 				target.boosts = { ...into.boosts };

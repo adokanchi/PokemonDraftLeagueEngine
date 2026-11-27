@@ -4,8 +4,9 @@ An analysis and practice engine for Pokémon Champions VGC draft league matches,
 Pokémon Showdown. Goals: team construction, team preview, and move evaluation. The design is
 in [docs/design.md](docs/design.md).
 
-**Status:** foundations (phase P0). The simulator harness, legal-move enumeration, draft-rule
-validator, battle-log parser and benchmark are working and tested. The turn solver is next (P1).
+**Status:** foundations (P0) done; P1 in progress. The simulator harness, legal-move enumeration,
+draft-rule validator, battle-log parser, benchmark and **Illusion (Zoroark) inference** are working
+and tested. The turn solver is next.
 
 ## Setup
 
@@ -31,6 +32,9 @@ If you cloned without `--recurse-submodules`, `npm run setup` fetches the submod
 | `npm run validate -- examples/rosters.json:a examples/team-a.txt` | Check a roster and team against the league rules and Showdown's validator |
 | `npm run check-parser -- 1000` | Deep check of the log parser against simulator truth over many random battles |
 | `npm run parse-log -- examples/sample-battle.log --turn 4` | Show what a player knows at a point in a battle (log, replay JSON or saved replay HTML; `--as p1`, `--json`) |
+| `npm run parse-log -- replay.html --as p1 --team my-team.txt --turn 5` | Same, plus the chance each opposing Pokémon is a disguised Zoroark (when one is in their preview) |
+| `npm run fetch-usage` | Download Smogon usage stats for the format (priors for opponents' sets) into `data/usage/` |
+| `npm run check-illusion -- 300` | Check Illusion inference against simulator truth over many battles |
 
 Rosters can be JSON (`{"coach": "...", "pokemon": ["Mega Garchomp Z", "Incineroar", ...]}`,
 several per file selected with `file.json:key`) or a text file with one Pokémon per line. Teams use
