@@ -91,6 +91,11 @@ export interface IllusionOptions {
 	knowledge?: TeamKnowledge;
 	/** Drafted Megas on the analysed side: team species -> Mega Stone. */
 	megaStones?: Record<string, string>;
+	/**
+	 * Called for each ability/item/move revealed for an analysed-side Pokémon on the field, with
+	 * the probability (after this evidence) that the Pokémon in that slot is Zoroark.
+	 */
+	onReveal?: (e: ParserEvent, slot: number, pZoroark: number) => void;
 }
 
 export interface SlotReport {
@@ -814,6 +819,20 @@ export class IllusionTracker {
 				else if (e.type === 'move' && cmd === 'move') this.onMove(s, e.move);
 			}
 		}
+		if (this.opts.onReveal) {
+			for (const e of events) {
+				if (e.mon.side !== this.side || e.mon.activeSlot === null || e.mon.ident.endsWith('#illusion')) continue;
+				this.opts.onReveal(e, e.mon.activeSlot, this.slotZ(e.mon.activeSlot));
+			}
+		}
+	}
+
+	/** P(the Pokémon in this slot is Zoroark), 0 if no Zoroark is possible. */
+	slotZ(slot: number): number {
+		if (this.inert || !this.initialized) return 0;
+		let z = 0;
+		for (const h of this.hyps) if (h.phys[h.order[slot]!]?.isZ) z += h.w;
+		return z;
 	}
 
 	// ---- results ---------------------------------------------------------------------------------

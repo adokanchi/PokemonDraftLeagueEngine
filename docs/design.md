@@ -1,4 +1,4 @@
-# Draft League Engine — Spec & Design (v6)
+# Draft League Engine — Spec & Design (v7)
 
 _Last updated: 2026-11-26. Repo: https://github.com/adokanchi/PokemonDraftLeagueEngine_
 
@@ -135,7 +135,32 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 - Priors: `src/data/priors.ts`. With no usage file, every legal ability, item and move is equally likely, so the "rarely runs that move / that ability" evidence is weak. `npm run fetch-usage` downloads Smogon usage for the format into `data/usage/`, and it is then blended with a 3% open-world floor.
 - Not yet used: damage dealt *by* the suspected Zoroark (STAB and stats via damage calcs), and Grassy Terrain healing.
 
+#### 5.4.2 Opponent sets — **built (P1 v0)**, `src/belief/sets.ts`
+- A pool of candidate full sets per species in their preview: moves, ability, item, stat points and nature. Sources:
+  - Showdown's curated Champions random-doubles sets (moves, ability, item);
+  - Smogon usage when downloaded;
+  - spread templates (fast attacker, bulky attacker, support, Trick Room), or usage spreads when available.
+- **Hard facts always hold**: revealed moves, ability and item; item clause; drafted Mega stones; earlier games in the set. Reveals are credited to Zoroark or to the shown species only when the Illusion posterior is clear (below 5% or above 95%).
+- **Damage evidence**: every hit we land on them, and every hit they land on us, is scored against each candidate with Showdown's own damage formula (`src/belief/damage.ts`, min/max roll, crit, spread, weather, terrain, screens, boosts). With the true sets this explains 97% of observed hits. The misses are mostly Rage Fist, multi-hit moves, Sash/Sturdy and Disguise, so a mismatch is soft evidence (×0.05), not proof.
+- `sampleTeam()` draws a full four consistent with everything, including where a disguised Zoroark is.
+- Not yet: speed-order evidence in the set model (only Illusion uses it so far), Bo3 opponent tendencies.
+
 ### 5.5 Turn solver (Goal 3)
+**Built (P1 v0):**
+- `src/engine/reconstruct.ts` rebuilds a simulator battle from the known state plus a sampled opponent team. It restores:
+  - actives, HP (exact for us, middle of the shown percentage for them), status, boosts, Mega, items lost or swapped, PP, faints;
+  - volatiles (Substitute, Taunt, Encore, Choice lock, Leech Seed...);
+  - weather, terrain, rooms and side conditions with remaining turns;
+  - Fake Out and turn counters;
+  - disabled moves and trapping, recomputed.
+  Checked against real battles, over 90% of decision points match exactly, including the full set of legal choices. Known gaps: Illusion and Transform edge cases, and rare volatiles.
+- `src/engine/evaluate.ts`: hand-written score (Pokémon left, HP, status, boosts, Tailwind/screens, Trick Room vs team speed).
+- `src/engine/solver.ts`: K determinizations. Each side's actions are narrowed per Pokémon against a few replies, then every pair is simulated (finishing the turn, forced switches included). The game "one mix for us vs the opponent best-responding in each guess" is solved by regret matching. Output: mixed strategy, values, and the opponent's likely actions.
+- `src/engine/bots.ts`: `SolverBot` plays from its own view of the log only. `OracleGreedyBot` is a one-turn greedy baseline that sees both teams.
+- Results (cloud sandbox, 1 thread, samples 2, keep 6, ≈1 s per decision): **16–0 vs random**, **7–3 vs the oracle greedy bot**. `npm run advise` defaults (samples 6, keep 12) take ≈9 s single-threaded.
+- Next: worker-thread parallel search (≈4–10× on the user's machines), speed evidence in the set model, deeper search, and tuning the evaluator by self-play.
+
+**Original design:**
 1. Prune each side's actions to plausible ones (heuristic or policy prior).
 2. Sample K opponent configurations from the belief engine.
 3. Per sample, build a joint-action payoff matrix: evaluator score averaged over chance outcomes.
@@ -163,7 +188,7 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 ## 6. Build order
 
 - **P0 Foundations — done except data ingest:** repo, pinned Showdown + in-process sim harness, legal-choice enumeration, benchmark script, draft validator, battle-state schema + Showdown log parser + Bo3 knowledge. Data ingest (usage stats, replays) moved to P3/P4, where it's first needed.
-- **P1 Goal 3 v0:** belief tracker v0 (hard evidence) + heuristic one-turn matrix solver + bot-vs-bot harness. Milestone: beats simple baselines; sensible advice on hand-built states. *Done so far: Illusion inference (§5.4.1), usage-prior plumbing, turn-order/speed model.*
+- **P1 Goal 3 v0 — done:** Illusion inference (§5.4.1), opponent set model with damage evidence (§5.4.2), battle reconstruction, heuristic evaluator, one-turn matrix solver, bot-vs-bot arena, `npm run advise`. Beats random 16–0 and an oracle greedy bot 7–3. Follow-ups: parallel search, speed evidence for sets.
 - **P1b Practice mode:** engine as a bot on a local Showdown server.
 - **P2 Goal 2 v0:** preview solver from P1 simulations.
 - **P3 Goal 1 v0:** set generator (5.3 layer 2) + spread tuning + teambuilder on shortlisted teams; team strength and variant deltas.

@@ -20,8 +20,19 @@ export interface SpreadEntry {
 	p: number;
 }
 
+export interface FullSpread {
+	nature: string;
+	/** Stat points per stat. */
+	sp: { hp: number; atk: number; def: number; spa: number; spd: number; spe: number };
+	p: number;
+}
+
 export interface SetPrior {
 	readonly source: string;
+	/** True when backed by real usage data (not just legality). */
+	readonly hasUsage: boolean;
+	/** Full stat spreads seen in usage data (empty without data). */
+	fullSpreads(species: string): FullSpread[];
 	/** Ability id -> probability (sums to 1). */
 	abilityProbs(species: string): Map<string, number>;
 	/** Item id -> probability (sums to 1; '' = no item). */
@@ -47,6 +58,8 @@ function defaultSpeedSpreads(): SpreadEntry[] {
 
 export class UniformPrior implements SetPrior {
 	readonly source = 'uniform (no usage data)';
+	readonly hasUsage = false;
+	fullSpreads(): FullSpread[] { return []; }
 	private learnable = new Map<string, Set<string>>();
 	private validator: TeamValidator;
 	private legalItems: string[];
@@ -107,6 +120,7 @@ interface ChaosMon {
 /** Usage-based prior with an open-world floor of `floor` (share of probability kept uniform). */
 export class UsagePrior implements SetPrior {
 	readonly source: string;
+	readonly hasUsage = true;
 	private data: Record<string, ChaosMon>;
 	private byId = new Map<string, ChaosMon>();
 
@@ -156,6 +170,24 @@ export class UsagePrior implements SetPrior {
 		if (!mon?.Moves || !total || !raw) return uni;
 		const w = mon.Moves[toID(move)] ?? 0;
 		return Math.min(1, (1 - this.floor) * (w / total) + this.floor * uni);
+	}
+
+	fullSpreads(species: string): FullSpread[] {
+		const spreads = this.mon(species)?.Spreads;
+		if (!spreads) return [];
+		const out: FullSpread[] = [];
+		let total = 0;
+		for (const [key, w] of Object.entries(spreads)) {
+			const m = /^(\w+):([\d/]+)$/.exec(key);
+			if (!m) continue;
+			let v = m[2]!.split('/').map(Number);
+			if (v.some(x => x > 32)) v = v.map(x => Math.floor(x / 8));
+			const [hp = 0, atk = 0, def = 0, spa = 0, spd = 0, spe = 0] = v;
+			out.push({ nature: m[1]!, sp: { hp, atk, def, spa, spd, spe }, p: w });
+			total += w;
+		}
+		for (const e of out) e.p /= total || 1;
+		return out.sort((a, b) => b.p - a.p);
 	}
 
 	speedSpreads(species: string): SpreadEntry[] {

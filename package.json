@@ -18,7 +18,9 @@
     "parse-log": "tsx scripts/parse-log.ts",
     "check-parser": "tsx scripts/check-parser.ts",
     "check-illusion": "tsx scripts/check-illusion.ts",
-    "fetch-usage": "tsx scripts/fetch-usage.ts"
+    "fetch-usage": "tsx scripts/fetch-usage.ts",
+    "arena": "tsx scripts/arena.ts",
+    "advise": "tsx scripts/advise.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

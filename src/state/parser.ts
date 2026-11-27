@@ -469,6 +469,8 @@ export class BattleLogParser {
 				const id = toID(moveName);
 				user.moves[id] ??= { uses: 0 };
 				user.moves[id]!.uses++;
+				user.lastMove = id;
+				user.lastMoveTurn = st.turn;
 				this.opts.onEvent?.({ type: 'move', mon: user, move: id });
 			}
 			if (from.toLowerCase().startsWith('ability:')) {
