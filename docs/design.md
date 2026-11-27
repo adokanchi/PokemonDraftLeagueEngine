@@ -5,7 +5,6 @@ _Last updated: 2026-11-26. Repo: https://github.com/adokanchi/PokemonDraftLeague
 ## 0. Ground rules
 
 - **Pokémon Showdown is the source of truth.** League matches are played on Showdown, and Showdown battles are the final measure of success. Any mechanic in Showdown's simulator counts as correct, even where it differs from in-game Champions. Mechanics data (moves, PP, abilities, items, legality) comes from Showdown, never from hand-maintained lists.
-- If a Showdown edge case looks significant, or Showdown seems to differ from in-game Champions, **ask the user directly**. The engine still follows Showdown.
 - Optimize for Reg M-C now. Keep format and legality data-driven so the engine carries over to future VGC regulations (see §9).
 
 ### Showdown specifics (pinned: smogon/pokemon-showdown c7fa6f1, 2026-11-25)
@@ -29,7 +28,7 @@ _Last updated: 2026-11-26. Repo: https://github.com/adokanchi/PokemonDraftLeague
 6. No Z-moves, Dynamax, or Tera.
 7. Everything else (moves, items, abilities, mechanics) follows Reg M-C as implemented on Showdown.
 
-### League facts (confirmed by user)
+### League facts
 - **Rosters are public.** Both coaches know each other's full 9–10 Pokémon roster, including Mega designations. Neither knows the other's moves, items, abilities or stats.
 - **Teams are locked for the whole Bo3.** Pokémon, moves, items and stats can't change between games. Only which 4 are brought and the lead order can change. Anything learned about the opponent's team stays valid for the rest of the set. Same for what they learn about yours.
 
