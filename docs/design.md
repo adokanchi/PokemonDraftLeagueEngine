@@ -1,6 +1,6 @@
-# Draft League Engine — Spec & Design (v7)
+# Draft League Engine — Spec & Design (v8)
 
-_Last updated: 2026-11-26. Repo: https://github.com/adokanchi/PokemonDraftLeagueEngine_
+_Last updated: 2026-11-27. Repo: https://github.com/adokanchi/PokemonDraftLeagueEngine_
 
 ## 0. Ground rules
 
@@ -85,6 +85,7 @@ Shared infrastructure: format/data layer, simulator, set priors, belief engine, 
 - `src/draft/validator.ts`: roster rules 1–4 + team rules (roster membership, Mega stone rules) on top of Showdown's TeamValidator. Accepts "Mega Garchomp Z" style names; maps Megas to the forme used on a team (Floette-Mega → Floette-Eternal).
 - `src/state/types.ts`: battle state = exactly what a player knows (field, HP as shown, boosts, statuses, volatiles, revealed moves/items/abilities, item history, Mega status, Illusion handling).
 - `src/state/parser.ts`: Showdown protocol/replay → state; `--turn N` gives the state when choosing turn N. Checked against simulator truth: 0 mismatches over ~66k state checks (2,000 random battles × spectator/p1/p2 views). Known inherent limit: while an Illusion disguise is unbroken, the log attributes the Zoroark's actions to the disguise.
+- The parser also records what the rebuild and the damage model need, each checked against the simulator (0 mismatches over ~9.6k checks, except 9 move-failure edge cases): hits taken since switching in (Rage Fist), type changes (Protean, Soak, Mimicry), Disable and its move, trapping and its source (Infestation, Spirit Shackle), charging and Outrage-style locks, Charge, Helping Hand/Roost for the turn, Glaive Rush, whether its last move failed (Stomping Tantrum), moves used since switching in (Last Resort), item changes after its last move (Choice lock after Trick), fainted allies when it came in (Supreme Overlord), changed abilities reverting on switch-out, Skill Swap between allies (whose ability it now has), Shed Tail's Substitute.
 - `src/state/knowledge.ts`: per-team revealed facts for Bo3 carry-over, merging across games, item-clause exclusions. Manual exclusions ("not Sitrus") have fields; entering them is still TODO.
 
 ### 5.2 Simulator — **built (P0)**
@@ -141,7 +142,12 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
   - Smogon usage when downloaded;
   - spread templates (fast attacker, bulky attacker, support, Trick Room), or usage spreads when available.
 - **Hard facts always hold**: revealed moves, ability and item; item clause; drafted Mega stones; earlier games in the set. Reveals are credited to Zoroark or to the shown species only when the Illusion posterior is clear (below 5% or above 95%).
-- **Damage evidence**: every hit we land on them, and every hit they land on us, is scored against each candidate with Showdown's own damage formula (`src/belief/damage.ts`, min/max roll, crit, spread, weather, terrain, screens, boosts). With the true sets this explains 97% of observed hits. The misses are mostly Rage Fist, multi-hit moves, Sash/Sturdy and Disguise, so a mismatch is soft evidence (×0.05), not proof.
+- **Damage evidence**: every hit we land on them, and every hit they land on us, is scored against each candidate with Showdown's own damage formula (`src/belief/damage.ts`).
+  - The calculation runs on the whole field at the moment of the hit, restored with the same code as battle reconstruction (`src/engine/restore.ts`): all four active Pokémon (allies matter: Friend Guard, auras, Power Spot), HP, status, boosts, Mega, type changes, abilities, items, volatiles (Helping Hand, Charge, Roost...), hit and faint counters (Rage Fist, Last Respects, Supreme Overlord), side conditions and field, and who still has to move this turn (Payback, Analytic, Bolt Beak).
+  - `src/belief/hits.ts` turns the log into one observation per hit: which hit of a multi-hit move (Triple Axel, Parental Bond's second hit), a crit on that hit, an item the hit used up (resist berries), Fickle Beam's announced double power. Hits capped after the formula (KO, Focus Sash, Sturdy, Endure, False Swipe) count as "at least this much"; hits absorbed by Disguise/Ice Face are ignored.
+  - With the true sets it explains **99.97% of hits** (9,803 of 9,806 over 500 fresh battles, multi-hit moves included; `npm run check-damage`). It is informative: a wrong defensive spread still fits only 25% of hits, a wrong attacker item 22%. A mismatch stays soft evidence (×0.05).
+  - Effect on predictions (`npm run check-sets`): against opponents with realistic spreads, learning from the first four turns raises how often later hits land inside the predicted range from 80.5% to 85.6%. The limit now is the candidate pool (template spreads), not the calculation.
+  - Fixed along the way: the calculation's scratch battle used to stop working after ~1,000 log lines (Showdown's loop guard), silently switching damage evidence off; resist berries were eaten during the min-roll calculation, so the max ignored them; cosmetic formes (Vivillon, Furfrou, Squawkabilly colours...) had no candidate sets.
 - `sampleTeam()` draws a full four consistent with everything, including where a disguised Zoroark is.
 - Not yet: speed-order evidence in the set model (only Illusion uses it so far), Bo3 opponent tendencies.
 
@@ -153,7 +159,7 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
   - weather, terrain, rooms and side conditions with remaining turns;
   - Fake Out and turn counters;
   - disabled moves and trapping, recomputed.
-  Checked against real battles, over 90% of decision points match exactly, including the full set of legal choices. Known gaps: Illusion and Transform edge cases, and rare volatiles.
+  Checked against real battles (`npm run check-reconstruct`): **99.7% of 3,138 decision points match exactly**, including the full set of legal choices, abilities, types, volatiles, turn counters and hit counters (was 96.4%). Fixed: which move Disable hit; trapping (Infestation-style, Spirit Shackle); charging two-turn moves and Outrage locks; Transform into a Pokémon that has since fainted; Choice lock after Trick and with Klutz; Last Resort; Trace and other changed abilities; White Herb eaten when the rebuilt battle starts; Unburden; Charge; type changes; Glaive Rush; our own Zoroark (found by its exact HP); leads' turns-on-field counter (it was one short, so Speed Boost didn't fire at the end of turn 1 in simulations). What's left is mostly Revival Blessing edge cases.
 - `src/engine/evaluate.ts`: hand-written score (Pokémon left, HP, status, boosts, Tailwind/screens, Trick Room vs team speed).
 - `src/engine/solver.ts`: K determinizations. Each side's actions are narrowed per Pokémon against a few replies, then every pair is simulated (finishing the turn, forced switches included). The game "one mix for us vs the opponent best-responding in each guess" is solved by regret matching. Output: mixed strategy, values, and the opponent's likely actions.
 - `src/engine/bots.ts`: `SolverBot` plays from its own view of the log only. `OracleGreedyBot` is a one-turn greedy baseline that sees both teams.
@@ -188,7 +194,7 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 ## 6. Build order
 
 - **P0 Foundations — done except data ingest:** repo, pinned Showdown + in-process sim harness, legal-choice enumeration, benchmark script, draft validator, battle-state schema + Showdown log parser + Bo3 knowledge. Data ingest (usage stats, replays) moved to P3/P4, where it's first needed.
-- **P1 Goal 3 v0 — done:** Illusion inference (§5.4.1), opponent set model with damage evidence (§5.4.2), battle reconstruction, heuristic evaluator, one-turn matrix solver, bot-vs-bot arena, `npm run advise`. Beats random 16–0 and an oracle greedy bot 7–3. Follow-ups: parallel search, speed evidence for sets.
+- **P1 Goal 3 v0 — done:** Illusion inference (§5.4.1), opponent set model with damage evidence (§5.4.2), battle reconstruction, heuristic evaluator, one-turn matrix solver, bot-vs-bot arena, `npm run advise`. Beats random 16–0 and an oracle greedy bot 7–3. Accuracy pass: damage model 99.97% of hits, rebuild 99.7% of decision points. Follow-ups: parallel search, speed evidence for sets, richer candidate spreads (solve for spreads that fit the observed damage).
 - **P1b Practice mode:** engine as a bot on a local Showdown server.
 - **P2 Goal 2 v0:** preview solver from P1 simulations.
 - **P3 Goal 1 v0:** set generator (5.3 layer 2) + spread tuning + teambuilder on shortlisted teams; team strength and variant deltas.

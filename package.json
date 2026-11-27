@@ -20,7 +20,10 @@
     "check-illusion": "tsx scripts/check-illusion.ts",
     "fetch-usage": "tsx scripts/fetch-usage.ts",
     "arena": "tsx scripts/arena.ts",
-    "advise": "tsx scripts/advise.ts"
+    "advise": "tsx scripts/advise.ts",
+    "check-damage": "tsx scripts/check-damage.ts",
+    "check-reconstruct": "tsx scripts/check-reconstruct.ts",
+    "check-sets": "tsx scripts/check-sets.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

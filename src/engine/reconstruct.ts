@@ -12,6 +12,7 @@ import { toID, type Battle, type PokemonSet } from '../showdown.js';
 import { resolveFormat, type ResolvedFormat } from '../config.js';
 import { createBattle } from '../sim/battle.js';
 import type { KnownBattleState, MonState, SideId } from '../state/types.js';
+import { finishActives, restoreActive, restoreField, restoreItem, restoreSide, type RestoreEnv } from './restore.js';
 
 export interface ReconstructInput {
 	state: KnownBattleState;
@@ -20,11 +21,6 @@ export interface ReconstructInput {
 	format?: ResolvedFormat;
 	seed?: number;
 }
-
-/** Volatiles that only make sense mid-move or are re-derived elsewhere. */
-const SKIP_VOLATILES = new Set(['lockedmove', 'twoturnmove', 'choicelock', 'stall', 'protect', 'banefulbunker', 'spikyshield', 'kingsshield',
-	'silktrap', 'burningbulwark', 'obstruct', 'endure', 'helpinghand', 'flinch', 'roost', 'charge', 'rage', 'bide', 'uproar', 'illusion']);
-const VOLATILE_DURATIONS: Record<string, number> = { taunt: 3, encore: 3, disable: 4, yawn: 2, healblock: 5, embargo: 5, magnetrise: 5, throatchop: 2, telekinesis: 3 };
 
 function teamForme(format: ResolvedFormat, name: string): string {
 	const sp = format.dex.species.get(name);
@@ -40,13 +36,6 @@ function matchSet(format: ResolvedFormat, mon: MonState, sets: PokemonSet[], use
 	return sets.findIndex((s, i) => !used.has(i) && [want, shown].includes(teamForme(format, s.species)));
 }
 
-/** Turns left for an effect that started on `since`, given its full duration. */
-function remaining(full: number, since: number, turn: number): number {
-	// Started before turn 1 (lead abilities): no end-of-turn has passed until turn 1 ends.
-	const elapsed = turn - Math.max(since, 1);
-	return Math.max(1, full - elapsed);
-}
-
 export interface Reconstructed {
 	battle: Battle;
 	/** For each side, the known MonState behind each battle Pokémon (null = unseen). */
@@ -54,6 +43,36 @@ export interface Reconstructed {
 }
 
 export function reconstructBattle(input: ReconstructInput): Reconstructed {
+	const built = build(input);
+	// Our own Zoroark: the log shows its disguise, but we know our exact HP. If an active
+	// Pokémon's HP only fits our Zoroark, rebuild with the Zoroark in that slot.
+	const state = input.state;
+	const mine = state.perspective;
+	if (mine && input.teams[mine].some(s => /^Zoroark/.test(s.species))) {
+		const side = built.battle.sides[mine === 'p1' ? 0 : 1]!;
+		const zoroark = side.pokemon.find(p => p.baseSpecies.baseSpecies === 'Zoroark');
+		let fixed: KnownBattleState | undefined;
+		side.active.forEach((p, slot) => {
+			const mon = state.sides[mine].pokemon.find(m => m.ident === state.sides[mine].active[slot]);
+			if (!p || !mon || !zoroark || p === zoroark || mon.maxHp === 100 || mon.maxHp === p.maxhp || mon.maxHp !== zoroark.maxhp) return;
+			fixed ??= structuredClone(state);
+			const m = fixed.sides[mine].pokemon.find(x => x.ident === mon.ident)!;
+			m.species = m.teamSpecies = m.permanentSpecies = zoroark.species.name;
+		});
+		if (fixed) return build({ ...input, state: fixed });
+	}
+	return built;
+}
+
+/** The state with the Pokémon shown as `ident` actually being a disguised Zoroark (a determinization). */
+export function withZoroarkAs(state: KnownBattleState, side: SideId, ident: string, zoroarkSpecies: string): KnownBattleState {
+	const out = structuredClone(state);
+	const mon = out.sides[side].pokemon.find(p => p.ident === ident);
+	if (mon) { mon.species = zoroarkSpecies; mon.teamSpecies = zoroarkSpecies; mon.permanentSpecies = zoroarkSpecies; }
+	return out;
+}
+
+function build(input: ReconstructInput): Reconstructed {
 	const format = input.format ?? resolveFormat();
 	const { state } = input;
 	const order: Record<SideId, PokemonSet[]> = { p1: [], p2: [] };
@@ -112,10 +131,17 @@ export function reconstructBattle(input: ReconstructInput): Reconstructed {
 		});
 	}
 
+	type BattlePokemon = Battle['sides'][number]['pokemon'][number];
+	const byIdent = new Map<string, BattlePokemon>();
+	for (const id of ['p1', 'p2'] as const) {
+		battle.sides[id === 'p1' ? 0 : 1]!.pokemon.forEach((p, i) => { const mon = mapping[id][i]; if (mon) byIdent.set(mon.ident, p); });
+	}
+	const env: RestoreEnv = { battle, format, turn, find: ident => (ident ? byIdent.get(ident) : undefined) };
+	// Pass 2: faints, HP, status, items, PP for everyone; then the active Pokémon's volatile state
+	// (once all HP etc. is in place, since Transform copies from its target).
+	const actives: { p: BattlePokemon; mon: MonState }[] = [];
 	for (const id of ['p1', 'p2'] as const) {
 		const side = battle.sides[id === 'p1' ? 0 : 1]!;
-		const known = state.sides[id];
-		const foe = battle.sides[id === 'p1' ? 1 : 0]!;
 		side.pokemon.forEach((p, i) => {
 			const mon = mapping[id][i];
 			if (!mon) return;
@@ -136,82 +162,20 @@ export function reconstructBattle(input: ReconstructInput): Reconstructed {
 				p.setStatus(mon.status, p, null, true);
 				if (mon.status === 'slp') p.statusState.time = 2;
 			}
-			// Items: lost, or swapped by Trick etc.
-			if (mon.item.current === '' && mon.item.lostVia) p.item = '' as never;
-			else if (mon.item.swapped && mon.item.current) p.item = toID(mon.item.current) as never;
+			restoreItem(p, mon);
 			// PP used.
 			for (const [moveId, m] of Object.entries(mon.moves)) {
-				const slot = p.moveSlots.find(s => s.id === moveId);
+				const slot = p.baseMoveSlots.find(s => s.id === moveId);
 				if (slot) slot.pp = Math.max(0, slot.pp - m.uses);
 			}
-			if (p.isActive) {
-				p.clearVolatile(false); // (also resets boosts and turn counters, so those come after)
-				// A Pokémon that came in during turn T first acts on turn T+1 (Fake Out, First Impression).
-				const inTurn = mon.switchedInTurn ?? 0;
-				p.activeTurns = Math.max(0, inTurn === 0 ? turn - 1 : turn - inTurn);
-				p.activeMoveActions = Math.max(0, turn - (inTurn + 1));
-
-				p.boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0, ...mon.boosts } as never;
-				// Temporary formes (Hunger Switch, Stance Change, ...) and Transform.
-				const cur = dex.species.get(mon.species);
-				if (!cur.isMega && cur.name !== p.species.name && cur.baseSpecies === p.species.baseSpecies) p.formeChange(cur.name, null, false);
-				if (mon.transformedInto) {
-					const into = dex.species.get(mon.transformedInto);
-					const target = foe.active.find(f => f && (f.species.name === into.name || f.species.baseSpecies === into.baseSpecies));
-					if (target) p.transformInto(target);
-				}
-				if (mon.lastMove && p.moveSlots.some(m => m.id === toID(mon.lastMove))) p.lastMove = dex.getActiveMove(mon.lastMove) as never;
-				const foeActive = foe.active.find(f => f && !f.fainted) ?? null;
-				for (const v of Object.keys(mon.volatiles)) {
-					if (['typechange', 'mustrecharge', 'transform'].includes(v)) continue;
-					if (v === 'substitute') {
-						p.addVolatile('substitute');
-						if (p.volatiles.substitute) p.volatiles.substitute.hp = Math.floor(p.maxhp / 4);
-						continue;
-					}
-					if (v === 'leechseed' && foeActive) { p.addVolatile('leechseed', foeActive); continue; }
-					if (SKIP_VOLATILES.has(v)) continue;
-					if (dex.conditions.get(v).exists || dex.moves.get(v).exists) {
-						try { p.addVolatile(v, foeActive ?? undefined); } catch { continue; }
-						const d = VOLATILE_DURATIONS[v];
-						if (d && p.volatiles[v]) p.volatiles[v].duration = Math.max(1, d - (turn - mon.volatiles[v]!.since));
-					}
-				}
-				const item = p.getItem();
-				if (item.isChoice && mon.lastMove && (mon.lastMoveTurn ?? -1) >= (mon.switchedInTurn ?? 0)) {
-					// (addVolatile('choicelock') needs a move in progress; build the state directly.)
-					p.volatiles.choicelock = battle.initEffectState({ id: 'choicelock', target: p, move: toID(mon.lastMove) } as never) as never;
-				}
-				const lastMove = mon.lastMove ? dex.moves.get(mon.lastMove) : undefined;
-				if (lastMove?.stallingMove && mon.lastMoveTurn === turn - 1) p.addVolatile('stall');
-			}
+			if (p.isActive) actives.push({ p, mon });
 		});
-		if (known.megaUsed) for (const p of side.pokemon) p.canMegaEvo = null;
-		// Side conditions.
-		for (const c of Object.keys(side.sideConditions)) side.removeSideCondition(c);
-		for (const [c, info] of Object.entries(known.conditions)) {
-			for (let l = 0; l < (info.layers ?? 1); l++) side.addSideCondition(c, 'debug');
-			const sc = side.sideConditions[c];
-			if (sc?.duration) sc.duration = remaining(sc.duration, info.since, turn);
-		}
 	}
-
-	// Field.
-	const field = battle.field;
-	if (state.field.weather) {
-		if (field.weather !== state.field.weather) field.setWeather(state.field.weather, 'debug');
-		if (field.weatherState.duration) field.weatherState.duration = remaining(5, state.field.weatherSince ?? 0, turn);
-	} else if (field.weather) field.clearWeather();
-	if (state.field.terrain) {
-		if (field.terrain !== state.field.terrain) field.setTerrain(state.field.terrain, 'debug');
-		if (field.terrainState.duration) field.terrainState.duration = remaining(5, state.field.terrainSince ?? 0, turn);
-	} else if (field.terrain) field.clearTerrain();
-	for (const pw of Object.keys(field.pseudoWeather)) if (!state.field.pseudoWeather[pw]) field.removePseudoWeather(pw);
-	for (const [pw, info] of Object.entries(state.field.pseudoWeather)) {
-		if (!field.pseudoWeather[pw]) field.addPseudoWeather(pw, 'debug');
-		const ps = field.pseudoWeather[pw];
-		if (ps?.duration) ps.duration = remaining(5, info.since, turn);
-	}
+	for (const { p } of actives) p.clearVolatile(false); // (also resets boosts, types and counters; restored next)
+	for (const { p, mon } of actives) restoreActive(p, mon, env);
+	finishActives(actives);
+	for (const id of ['p1', 'p2'] as const) restoreSide(battle.sides[id === 'p1' ? 0 : 1]!, state.sides[id], env);
+	restoreField(battle.field, state.field, env);
 
 	battle.turn = turn;
 	refreshMoveRestrictions(battle);

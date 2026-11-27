@@ -11,6 +11,36 @@ export interface Since {
 	since: number;
 }
 
+/** A volatile effect on a Pokémon, with whatever detail the log gives about it. */
+export interface VolatileInfo extends Since {
+	/** The move involved: the disabled move, the trapping move, the move being charged or locked into. */
+	move?: string;
+	/** ident of the Pokémon that caused it (trapping, Helping Hand). */
+	source?: string;
+	/** Types after a type change (Protean, Soak, Mimicry, ...). */
+	types?: string[];
+	/** How many times it has applied (turns of an Outrage-style lock; stacked Helping Hands). */
+	count?: number;
+	/** Lasts only until the end of the turn (Helping Hand, Roost, Protect, ...). */
+	singleTurn?: boolean;
+	/** Lasts until the Pokémon's next move (Glaive Rush, Destiny Bond, ...). */
+	singleMove?: boolean;
+}
+
+/** Things that reset when a Pokémon switches out. */
+export interface StintState {
+	/** Hits taken since switching in (Rage Fist; Champions resets this on switching). */
+	timesAttacked: number;
+	/** Moves used since switching in, with uses (Last Resort; a transformed Pokémon's 5 PP). */
+	moves: Record<string, number>;
+	/** Its item changed (gained, lost or swapped) after its last move: any Choice lock no longer holds. */
+	itemChangedSinceMove?: boolean;
+	/** It lost its item during this stint (Unburden). */
+	itemLost?: boolean;
+	/** Fainted allies when it came in (Supreme Overlord). */
+	faintedAllies: number;
+}
+
 export interface ItemKnowledge {
 	/** Item it is holding now, if known. `''` = known to hold nothing. `undefined` = unknown. */
 	current?: string;
@@ -52,7 +82,11 @@ export interface MonState {
 	statusSince?: number;
 	boosts: Partial<Record<BoostId, number>>;
 	/** Volatile effects by id (substitute, confusion, taunt, encore, leechseed, ...). */
-	volatiles: Record<string, Since>;
+	volatiles: Record<string, VolatileInfo>;
+	/** Counters since it last switched in (while it is active). */
+	stint?: StintState;
+	/** Hit counter it comes back with if Revival Blessing revives it. */
+	revivedHits?: number;
 	fainted: boolean;
 	/** 0-based active slot, or null if in the back. */
 	activeSlot: number | null;
@@ -63,15 +97,19 @@ export interface MonState {
 	transformedInto?: string;
 	/** Revealed moves (by id) with how many times each was used. */
 	moves: Record<string, { uses: number }>;
-	/** Last move it selected itself (not called by another move), and the turn it was used. */
+	/** Last move it used itself (not called by another move) since switching in, and on which turn. */
 	lastMove?: string;
 	lastMoveTurn?: number;
+	/** Turn on which its action last failed (missed, had no effect, or it couldn't move): Stomping Tantrum. */
+	failedTurn?: number;
 	/** Ability it was revealed to have (current). */
 	ability?: string;
 	/** Base (team sheet) ability, when we can tell it apart from a changed one. */
 	baseAbility?: string;
 	/** Its ability has been changed this battle (Skill Swap, Trace, Mummy, ...): `ability` may not be its own. */
 	abilityChanged?: boolean;
+	/** Skill Swap between allies hides the abilities: it now has this Pokémon's (ident) ability. */
+	abilityFrom?: string;
 	item: ItemKnowledge;
 	/** Turn this Pokémon last switched in. */
 	switchedInTurn?: number;
@@ -91,6 +129,8 @@ export interface SideState {
 	megaUsed: boolean;
 	/** Number of Pokémon brought (4 in bring-6-pick-4). */
 	teamSize?: number;
+	/** Turn on which one of its Pokémon last fainted (Retaliate). */
+	lastFaintTurn?: number;
 }
 
 export interface FieldState {

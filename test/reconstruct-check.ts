@@ -1,8 +1,11 @@
 /** Compare a battle rebuilt from p1's knowledge (+ true opponent sets) with the real one. */
 import type { Battle, PokemonSet } from '../src/showdown.js';
 import { legalChoices } from '../src/sim/battle.js';
-import { reconstructBattle } from '../src/engine/reconstruct.js';
+import { reconstructBattle, withZoroarkAs } from '../src/engine/reconstruct.js';
 import { parseBattleLog, viewOfLog } from '../src/state/parser.js';
+
+/** Bookkeeping volatiles with no effect on play from here (or re-created when needed). */
+const IGNORED_VOLATILES = new Set(['stall', 'trapper', 'illusion']);
 
 const forme = (p: { species: { name: string; battleOnly?: unknown; baseSpecies: string; isMega?: boolean } }) => p.species.name;
 
@@ -14,7 +17,12 @@ function normalize(battle: Battle, side: 0 | 1, choices: string[]): Set<string> 
 
 export function compareReconstruction(real: Battle): string[] {
 	const out: string[] = [];
-	const state = parseBattleLog(viewOfLog(real.log, 'p1').join('\n'), { perspective: 'p1' });
+	let state = parseBattleLog(viewOfLog(real.log, 'p1').join('\n'), { perspective: 'p1' });
+	// A disguised opposing Zoroark: rebuild as the solver does when it guesses the disguise right.
+	for (const [slot, p] of real.sides[1]!.active.entries()) {
+		const ident = state.sides.p2.active[slot];
+		if (p?.illusion && ident) state = withZoroarkAs(state, 'p2', ident, p.species.name);
+	}
 	const teams = {
 		p1: real.sides[0]!.pokemon.map(p => p.set as PokemonSet),
 		p2: real.sides[1]!.pokemon.map(p => p.set as PokemonSet),
@@ -34,6 +42,13 @@ export function compareReconstruction(real: Battle): string[] {
 			if (a.status !== b.status) out.push(`${t} ${side.id} ${a.name}: status ${b.status} vs ${a.status}`);
 			for (const [k, v] of Object.entries(a.boosts)) if ((b.boosts as Record<string, number>)[k] !== v) out.push(`${t} ${side.id} ${a.name}: boost ${k} ${(b.boosts as Record<string, number>)[k]} vs ${v}`);
 			if ((a.item || '') !== (b.item || '')) out.push(`${t} ${side.id} ${a.name}: item ${b.item} vs ${a.item}`);
+			if (a.ability !== b.ability) out.push(`${t} ${side.id} ${a.name}: ability ${b.ability} vs ${a.ability}`);
+			if (a.getTypes().join('/') !== b.getTypes().join('/')) out.push(`${t} ${side.id} ${a.name}: types ${b.getTypes()} vs ${a.getTypes()}`);
+			if (a.activeTurns !== b.activeTurns) out.push(`${t} ${side.id} ${a.name}: activeTurns ${b.activeTurns} vs ${a.activeTurns}`);
+			if (a.timesAttacked !== b.timesAttacked) out.push(`${t} ${side.id} ${a.name}: timesAttacked ${b.timesAttacked} vs ${a.timesAttacked}`);
+			if ((a.moveLastTurnResult === false) !== (b.moveLastTurnResult === false)) out.push(`${t} ${side.id} ${a.name}: lastTurnFailed ${b.moveLastTurnResult} vs ${a.moveLastTurnResult}`);
+			const vols = (p: typeof a) => Object.keys(p.volatiles).filter(v => !IGNORED_VOLATILES.has(v)).sort().join(',');
+			if (vols(a) !== vols(b)) out.push(`${t} ${side.id} ${a.name}: volatiles ${vols(b)} vs ${vols(a)}`);
 		}
 		for (const p of side.pokemon) {
 			const q = rs.pokemon.find(x => x.set.species === p.set.species);

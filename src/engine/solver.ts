@@ -15,7 +15,7 @@ import type { Battle, PokemonSet } from '../showdown.js';
 import { cloneBattle, legalChoices, sidesNeedingChoice, submit, type SideIndex } from '../sim/battle.js';
 import { makeRng } from '../sim/play.js';
 import type { KnownBattleState, SideId } from '../state/types.js';
-import { reconstructBattle } from './reconstruct.js';
+import { reconstructBattle, withZoroarkAs } from './reconstruct.js';
 import { evaluate } from './evaluate.js';
 import type { OpponentModel } from '../belief/sets.js';
 
@@ -207,10 +207,8 @@ export function solveTurn(input: SolveInput): SolveResult {
 		if (sample.sets.length === 0) continue;
 		let state = input.state;
 		if (sample.zoroarkIdent) {
-			state = structuredClone(state);
 			const zoro = sample.sets.find(s => s.species.startsWith('Zoroark'));
-			const mon = state.sides[themId].pokemon.find(p => p.ident === sample.zoroarkIdent);
-			if (zoro && mon) { mon.species = zoro.species; mon.teamSpecies = zoro.species; }
+			if (zoro) state = withZoroarkAs(state, themId, sample.zoroarkIdent, zoro.species);
 		}
 		try {
 			const { battle } = reconstructBattle({ state, teams: { [input.me]: input.myTeam, [themId]: sample.sets } as never, seed: o.seed * 1000 + k });

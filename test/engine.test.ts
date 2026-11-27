@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { PokemonSet } from '../src/showdown.js';
 import { createBattle, legalChoices, sidesNeedingChoice, submit } from '../src/sim/battle.js';
 import { makeRng, playOut, RandomPolicy } from '../src/sim/play.js';
-import { BattleLogParser, viewOfLog } from '../src/state/parser.js';
+import { BattleLogParser, parseBattleLog, viewOfLog } from '../src/state/parser.js';
 import { DamageCalc } from '../src/belief/damage.js';
+import { fits, HitRecorder, skipReason, type HitObservation } from '../src/belief/hits.js';
+import { resolveFormat } from '../src/config.js';
 import { OpponentModel } from '../src/belief/sets.js';
 import { UniformPrior } from '../src/data/priors.js';
 import { solveTurn } from '../src/engine/solver.js';
@@ -44,50 +46,65 @@ describe('rebuilding battles from what a player knows', () => {
 			}
 		}
 		expect(checks).toBeGreaterThan(150);
-		expect(bad / checks, examples.join('\n')).toBeLessThan(0.1);
+		expect(bad / checks, examples.join("\n")).toBeLessThan(0.02);
 	});
 });
 
 describe('damage model', () => {
-	it("Showdown's damage formula explains nearly all observed hits with the true sets", () => {
-		const calc = new DamageCalc();
-		let n = 0, ok = 0;
+	it("Showdown's damage formula, run on the whole field, explains every observed hit with the true sets", () => {
+		const format = resolveFormat();
+		const calc = new DamageCalc(format);
+		let n = 0, ok = 0, wrongOk = 0, multi = 0;
 		for (let seed = 1; seed <= 15; seed++) {
 			const b = advance(seed, 30);
+			if (b.sides.some(s => s.pokemon.some(p => p.baseSpecies.baseSpecies === 'Zoroark'))) continue;
 			const sets: Record<string, PokemonSet> = {};
 			for (const s of b.sides) for (const p of s.pokemon) sets[`${s.id}: ${p.name}`] = p.set as PokemonSet;
-			const parser = new BattleLogParser();
-			let mv: { ident: string; side: string; move: string; spread: boolean; crit: Set<string>; snap: string } | null = null;
-			const active = (pos: string) => {
-				const m = /^(p[12])([ab]):/.exec(pos);
-				if (!m) return undefined;
-				const sd = parser.state.sides[m[1] as 'p1'];
-				return sd.pokemon.find(x => x.ident === sd.active['ab'.indexOf(m[2]!)]);
-			};
-			for (const line of viewOfLog(b.log)) {
-				const parts = line.slice(1).split('|');
-				if (parts[0] === 'move') { const u = active(parts[1]!); mv = u && !line.includes('[from]') ? { ident: u.ident, side: u.side, move: parts[2]!, spread: line.includes('[spread]'), crit: new Set(), snap: JSON.stringify(parser.state) } : null; }
-				if (parts[0] === '-crit' && mv) mv.crit.add(parts[1]!);
-				const target = parts[0] === '-damage' && !line.includes('[from]') && mv ? active(parts[1]!) : undefined;
-				const before = target?.hp ?? 0;
-				parser.feed(line);
-				if (!target || !mv || target.ident === mv.ident || target.maxHp !== 100) continue;
-				const snap = JSON.parse(mv.snap);
-				const A = snap.sides[mv.side].pokemon.find((x: { ident: string }) => x.ident === mv!.ident);
-				const D = snap.sides[target.side].pokemon.find((x: { ident: string }) => x.ident === target.ident);
-				const sa = sets[mv.ident], sd = sets[target.ident];
-				if (!A || !D || !sa || !sd || /Ditto|Zoroark/.test(sa.species + sd.species)) continue;
-				const r = calc.range({ set: sa, species: A.species, boosts: A.boosts, hpFraction: A.hp / A.maxHp },
-					{ set: sd, species: D.species, boosts: D.boosts, hpFraction: before / 100, sideConditions: Object.keys(snap.sides[target.side].conditions) },
-					mv.move, { crit: mv.crit.has(parts[1]!), spread: mv.spread, weather: snap.field.weather, terrain: snap.field.terrain });
-				if (r.immune) continue;
+			const parser = new BattleLogParser({ perspective: 'p1' });
+			const hits: HitObservation[] = [];
+			const rec = new HitRecorder(() => parser.state, o => hits.push(o));
+			for (const line of viewOfLog(b.log, 'p1')) { rec.before(line); parser.feed(line); }
+			rec.flush();
+			for (const o of hits) {
+				if (skipReason(o, format)) continue;
 				n++;
-				const lost = before - target.hp, lo = 100 * r.min / r.maxHp - 1.5, hi = 100 * r.max / r.maxHp + 1.5;
-				if (target.hp === 0 ? hi >= lost : lost >= lo && lost <= hi) ok++;
+				if (o.hit > 1) multi++;
+				if (fits(o, calc.range(o, m => sets[m.ident]))) ok++;
+				// The same hit with a different defensive spread mostly doesn't fit: the evidence is informative.
+				if (!o.atLeast) {
+					const wrong = (m: { ident: string }) => m.ident === o.defender ? { ...sets[m.ident]!, nature: 'Hasty', evs: { hp: 0, atk: 32, def: 0, spa: 32, spd: 0, spe: 2 } } : sets[m.ident];
+					if (fits(o, calc.range(o, wrong as never))) wrongOk++;
+				}
 			}
 		}
 		expect(n).toBeGreaterThan(200);
-		expect(ok / n).toBeGreaterThan(0.9);
+		expect(multi).toBeGreaterThan(5);
+		expect(ok / n).toBeGreaterThan(0.99);
+		expect(wrongOk / n).toBeLessThan(0.5);
+	});
+
+	it('handles resist berries, Focus Sash and multi-hit moves', () => {
+		const calc = new DamageCalc();
+		const mk = (species: string, item: string, ability: string, moves: string[], evs: Partial<Record<'hp' | 'atk' | 'def' | 'spa' | 'spd' | 'spe', number>> = {}) => ({
+			name: species, species, item, ability, moves, nature: 'Adamant', gender: '', level: 50,
+			evs: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0, ...evs }, ivs: { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 },
+		}) as PokemonSet;
+		const state = parseBattleLog(['|player|p1|A|', '|player|p2|B|', '|gametype|doubles', '|start',
+			'|switch|p1a: Garchomp|Garchomp, L50|100/100', '|switch|p2a: Kingambit|Kingambit, L50|100/100', '|turn|1'].join('\n'));
+		const spec = { state, attacker: 'p1: Garchomp', defender: 'p2: Kingambit', move: 'Earthquake', crit: false, spread: false, hit: 1 };
+		const chomp = mk('Garchomp', '', 'Rough Skin', ['Earthquake', 'Scale Shot'], { atk: 32 });
+		const plain = calc.range(spec, m => (m.side === 'p1' ? chomp : mk('Kingambit', '', 'Defiant', ['Kowtow Cleave'])));
+		const berry = calc.range({ ...spec, itemsBefore: { 'p2: Kingambit': 'Shuca Berry' } }, m => (m.side === 'p1' ? chomp : mk('Kingambit', '', 'Defiant', ['Kowtow Cleave'])));
+		// The berry halves both ends of the range (it used to be eaten during the min roll only).
+		expect(berry.max).toBeLessThanOrEqual(Math.ceil(plain.max / 2) + 1);
+		expect(berry.min).toBeLessThanOrEqual(Math.ceil(plain.min / 2) + 1);
+		// Triple Axel's later hits hit harder.
+		const axel = mk('Weavile', '', 'Pressure', ['Triple Axel'], { atk: 32 });
+		const s2 = parseBattleLog(['|player|p1|A|', '|player|p2|B|', '|gametype|doubles', '|start',
+			'|switch|p1a: Weavile|Weavile, L50|100/100', '|switch|p2a: Kingambit|Kingambit, L50|100/100', '|turn|1'].join('\n'));
+		const h1 = calc.range({ state: s2, attacker: 'p1: Weavile', defender: 'p2: Kingambit', move: 'Triple Axel', crit: false, spread: false, hit: 1 }, m => (m.side === 'p1' ? axel : mk('Kingambit', '', 'Defiant', ['Kowtow Cleave'])));
+		const h3 = calc.range({ state: s2, attacker: 'p1: Weavile', defender: 'p2: Kingambit', move: 'Triple Axel', crit: false, spread: false, hit: 3 }, m => (m.side === 'p1' ? axel : mk('Kingambit', '', 'Defiant', ['Kowtow Cleave'])));
+		expect(h3.min).toBeGreaterThan(h1.max * 2);
 	});
 });
 

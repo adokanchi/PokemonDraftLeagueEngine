@@ -41,6 +41,9 @@ changed. If `npm test` says setup isn't finished, it tells you which step is mis
 | `npm run arena -- 20 [--vs greedy]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams) |
 | `npm run fetch-usage` | Download Smogon usage stats for the format (priors for opponents' sets) into `data/usage/` |
 | `npm run check-illusion -- 300` | Check Illusion inference against simulator truth over many battles |
+| `npm run check-damage -- 300` | Check the damage model against every hit of many random battles, with the true sets (`--misses` lists what it can't explain) |
+| `npm run check-reconstruct -- 300` | Check that battles rebuilt from a player's knowledge match the real ones (state and legal moves) |
+| `npm run check-sets -- 60` | Check that the opponent model learns from damage: how often later hits land in the range it predicts, with and without the evidence |
 
 Rosters can be JSON (`{"coach": "...", "pokemon": ["Mega Garchomp Z", "Incineroar", ...]}`,
 several per file selected with `file.json:key`) or a text file with one Pokémon per line. Teams use
