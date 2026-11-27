@@ -8,7 +8,8 @@ import { fits, HitRecorder, skipReason, type HitObservation } from '../src/belie
 import { resolveFormat } from '../src/config.js';
 import { OpponentModel } from '../src/belief/sets.js';
 import { UniformPrior } from '../src/data/priors.js';
-import { solveTurn } from '../src/engine/solver.js';
+import { solveTurn, solveTurnParallel } from '../src/engine/solver.js';
+import { SearchPool } from '../src/engine/pool.js';
 import { SolverBot, translateChoice } from '../src/engine/bots.js';
 import { randomBattle, randomTeam } from './helpers.js';
 import { teamWithZoroark } from './zoroark-helpers.js';
@@ -171,6 +172,24 @@ describe('one-turn solver', () => {
 		expect(res.value).toBeGreaterThanOrEqual(-1);
 		expect(res.value).toBeLessThanOrEqual(1);
 	});
+
+	it('gives the same answer on worker threads as in-process', async () => {
+		const b = advance(5, 3);
+		const make = () => {
+			const model = new OpponentModel({ side: 'p2', ownTeam: b.sides[0]!.team as PokemonSet[], prior, seed: 3 });
+			model.feedLog(viewOfLog(b.log, 'p1').join('\n'));
+			return { state: model.state, me: 'p1' as const, myTeam: b.sides[0]!.pokemon.map(p => p.set as PokemonSet), model, options: { samples: 2, keep: 5, perSlot: 3, replies: 2, iterations: 500, seed: 9 } };
+		};
+		const one = solveTurn(make());
+		const pool = await SearchPool.start(2);
+		try {
+			const par = await solveTurnParallel(make(), pool);
+			expect(par.simulations).toBe(one.simulations);
+			expect(par.options.map(o => [o.choice, o.p.toFixed(6)])).toEqual(one.options.map(o => [o.choice, o.p.toFixed(6)]));
+		} finally {
+			await pool.close();
+		}
+	}, 60000);
 
 	it('beats a random player', () => {
 		let wins = 0;

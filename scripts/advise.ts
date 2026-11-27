@@ -10,6 +10,7 @@
  *   --bring "A,B,C,D"  the four you brought, in the order you picked them (leads first); needed
  *                      to see through your own Zoroark's disguise, and if not all have appeared
  *   --zoroark a|b|none which of your active slots is your Zoroark right now, if the log can't tell
+ *   --threads N        worker threads for the search (default: all hardware threads but one; 1 = no workers)
  *   --their-roster FILE[:key]  their roster (JSON/txt) so drafted Mega stones are known
  *   --samples N --keep N       search budget (defaults 6 and 12; larger = slower, steadier)
  */
@@ -17,14 +18,15 @@ import { readFileSync } from 'node:fs';
 import { toTeam } from '../src/sim/battle.js';
 import { extractLog } from '../src/state/parser.js';
 import { OpponentModel } from '../src/belief/sets.js';
-import { solveTurn } from '../src/engine/solver.js';
+import { solveTurn, solveTurnParallel } from '../src/engine/solver.js';
+import { defaultThreads, SearchPool } from '../src/engine/pool.js';
 import { parseRoster } from '../src/draft/validator.js';
 import { Dex, toID, type PokemonSet } from '../src/showdown.js';
 import type { SideId } from '../src/state/types.js';
 
 const args = process.argv.slice(2);
 const opt = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
-const valueFlags = new Set(['--as', '--team', '--turn', '--bring', '--their-roster', '--samples', '--keep', '--zoroark']);
+const valueFlags = new Set(['--as', '--team', '--turn', '--bring', '--their-roster', '--samples', '--keep', '--zoroark', '--threads']);
 const file = args.find((a, i) => !a.startsWith('--') && !valueFlags.has(args[i - 1] ?? ''));
 const me = opt('as') as SideId | undefined;
 const teamFile = opt('team');
@@ -71,7 +73,7 @@ for (const id of [...seen, ...(bringNames ?? []), ...ownTeam.map(s => toID(s.spe
 
 const samples = Number(opt('samples') ?? 6);
 const keep = Number(opt('keep') ?? 12);
-console.log(`Turn ${turn}: thinking (${samples} guesses of their team, up to ${keep} options per side)...`);
+console.log(`Turn ${turn}: thinking (${samples} guesses of their team, up to ${keep} options per side, ${Number(opt('threads') ?? defaultThreads())} threads)...`);
 const zArg = opt('zoroark');
 const ownZoroark = zArg ? [0, 1].map(slot => ({ slot, isZoroark: zArg === 'ab'[slot] })) : undefined;
 if (!zArg) {
@@ -81,7 +83,15 @@ if (!zArg) {
 		}
 	}
 }
-const res = solveTurn({ state, me, myTeam, model, options: { samples, keep }, ownZoroark });
+const threads = Number(opt('threads') ?? defaultThreads());
+const input = { state, me, myTeam, model, options: { samples, keep }, ownZoroark };
+let res;
+if (threads > 1) {
+	const pool = await SearchPool.start(threads);
+	try { res = await solveTurnParallel(input, pool); } finally { await pool.close(); }
+} else {
+	res = solveTurn(input);
+}
 
 console.log(`\nRecommended (expected score ${res.value.toFixed(2)} on a -1..+1 scale):`);
 for (const o of res.options.filter(o => o.p >= 0.02)) console.log(`  ${(100 * o.p).toFixed(0).padStart(3)}%  ${o.label}`);
