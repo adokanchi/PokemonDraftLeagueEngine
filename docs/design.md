@@ -164,7 +164,8 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 - `src/engine/solver.ts`: K determinizations. Each side's actions are narrowed per Pokémon against a few replies, then every pair is simulated (finishing the turn, forced switches included). The game "one mix for us vs the opponent best-responding in each guess" is solved by regret matching. Output: mixed strategy, values, and the opponent's likely actions.
 - `src/engine/bots.ts`: `SolverBot` plays from its own view of the log only. `OracleGreedyBot` is a one-turn greedy baseline that sees both teams.
 - Results (cloud sandbox, 1 thread, samples 2, keep 6, ≈1 s per decision): **16–0 vs random**, **7–3 vs the oracle greedy bot**. `npm run advise` defaults (samples 6, keep 12) take ≈9 s single-threaded.
-- Next: worker-thread parallel search (≈4–10× on the user's machines), speed evidence in the set model, deeper search, and tuning the evaluator by self-play.
+- **Parallel search** (`src/engine/pool.ts`, `search-worker.ts`): the search is written as a sequence of batches of cells (one simulated turn each: guess k, our choice, theirs). `solveTurn` runs them in-process; `solveTurnParallel` sends the guesses to a pool of worker threads once (each rebuilds the same battles from the same seeds) and shares the batches out — identical results. `advise` uses all hardware threads but one by default; the arena plays whole games in parallel (`--jobs`). On the 2-core cloud sandbox the gain is ~1.5× (its raw ceiling is 1.4–2×); the laptop's bench scaled 4.2× on 16 threads, so `advise` should take ~2 s there instead of ~9.
+- Next: speed evidence in the set model, deeper search, and tuning the evaluator by self-play.
 
 **Original design:**
 1. Prune each side's actions to plausible ones (heuristic or policy prior).
@@ -194,7 +195,7 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 ## 6. Build order
 
 - **P0 Foundations — done except data ingest:** repo, pinned Showdown + in-process sim harness, legal-choice enumeration, benchmark script, draft validator, battle-state schema + Showdown log parser + Bo3 knowledge. Data ingest (usage stats, replays) moved to P3/P4, where it's first needed.
-- **P1 Goal 3 v0 — done:** Illusion inference (§5.4.1), opponent set model with damage evidence (§5.4.2), battle reconstruction, heuristic evaluator, one-turn matrix solver, bot-vs-bot arena, `npm run advise`. Beats random 16–0 and an oracle greedy bot 7–3. Accuracy pass: damage model 99.97% of hits, rebuild 99.7% of decision points. Follow-ups: parallel search, speed evidence for sets, richer candidate spreads (solve for spreads that fit the observed damage).
+- **P1 Goal 3 v0 — done:** Illusion inference (§5.4.1), opponent set model with damage evidence (§5.4.2), battle reconstruction, heuristic evaluator, one-turn matrix solver, bot-vs-bot arena, `npm run advise`. Beats random 16–0 and an oracle greedy bot 7–3. Accuracy pass: damage model 99.97% of hits, rebuild 99.7% of decision points. Parallel search done. Follow-ups: speed evidence for sets, richer candidate spreads (solve for spreads that fit the observed damage).
 - **P1b Practice mode:** engine as a bot on a local Showdown server.
 - **P2 Goal 2 v0:** preview solver from P1 simulations.
 - **P3 Goal 1 v0:** set generator (5.3 layer 2) + spread tuning + teambuilder on shortlisted teams; team strength and variant deltas.

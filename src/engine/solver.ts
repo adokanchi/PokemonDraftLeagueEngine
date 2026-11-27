@@ -114,15 +114,32 @@ export function describeChoice(battle: Battle, side: SideIndex, choice: string):
 	}).join('; ');
 }
 
-/** Split joint choices into per-Pokémon actions, and rebuild the joint ones that are legal. */
-function narrow(legal: string[], score: (choice: string) => number, perSlot: number, keep: number): string[] {
+/**
+ * Narrowing a side's joint choices: score each Pokémon's actions separately, keep the best few per
+ * Pokémon, and combine. `narrowProbes` lists the joint choices whose scores are needed (one per
+ * Pokémon action, paired with the first legal choice containing it); none if no narrowing is needed.
+ */
+function narrowProbes(legal: string[], keep: number): string[] {
+	if (legal.length <= keep) return [];
+	const nSlots = legal[0]!.split(', ').length;
+	const out = new Set<string>();
+	for (let slot = 0; slot < nSlots; slot++) {
+		const seen = new Set<string>();
+		for (const c of legal) {
+			const a = c.split(', ')[slot]!;
+			if (!seen.has(a)) { seen.add(a); out.add(c); }
+		}
+	}
+	return [...out];
+}
+
+function narrowPick(legal: string[], score: (choice: string) => number, perSlot: number, keep: number): string[] {
 	if (legal.length <= keep) return legal;
 	const parts = legal.map(c => c.split(', '));
 	const nSlots = parts[0]!.length;
 	const best: string[][] = [];
 	for (let slot = 0; slot < nSlots; slot++) {
 		const actions = [...new Set(parts.map(p => p[slot]!))];
-		// Pair each action with the other slot's most common action in the legal list.
 		const scored = actions.map(a => {
 			const joint = legal.find(c => c.split(', ')[slot] === a)!;
 			return { a, v: score(joint) };
@@ -193,16 +210,48 @@ export interface SolveInput {
 	ownZoroark?: { slot: number; isZoroark: boolean }[];
 }
 
-export function solveTurn(input: SolveInput): SolveResult {
+/** One simulated turn: in guess k, we play `mine` and they play `theirs`. */
+export type Cell = [k: number, mine: string, theirs: string];
+
+/** A guess of the opponent's team, with what's needed to rebuild the battle for it (anywhere). */
+export interface Determinization {
+	state: KnownBattleState;
+	teams: Record<SideId, PokemonSet[]>;
+	seed: number;
+}
+
+/** Simulate cells: in-process, or spread over worker threads (see pool.ts). Results in order. */
+export type CellRunner = (cells: Cell[]) => number[] | Promise<number[]>;
+
+/** Score one cell on a rebuilt battle (NaN when the simulator can't play it). */
+export function runCell(battles: Battle[], me: SideIndex, cell: Cell): number {
+	return playCell(battles[cell[0]]!, me, cell[1], cell[2]);
+}
+
+/** Rebuild the battle for a determinization (same seed, same battle: worker threads rely on it). */
+export function buildDeterminization(d: Determinization): Battle {
+	return reconstructBattle({ state: d.state, teams: d.teams, seed: d.seed }).battle;
+}
+
+interface Prepared {
+	o: Required<SolveOptions>;
+	me: SideIndex;
+	them: SideIndex;
+	dets: Determinization[];
+	battles: Battle[];
+	rng: () => number;
+	t0: number;
+}
+
+/** Draw the guesses of their team and rebuild the battle for each. */
+function prepare(input: SolveInput): Prepared {
 	const t0 = performance.now();
 	const o = { samples: 6, keep: 12, perSlot: 4, replies: 4, iterations: 3000, seed: 1, ...input.options };
 	const rng = makeRng(o.seed);
 	const me: SideIndex = input.me === 'p1' ? 0 : 1;
 	const them = (1 - me) as SideIndex;
 	const themId: SideId = input.me === 'p1' ? 'p2' : 'p1';
-	let simulations = 0;
-
-	// 1. Determinizations.
+	const dets: Determinization[] = [];
 	const battles: Battle[] = [];
 	for (let k = 0; k < o.samples; k++) {
 		const sample = input.model.sampleTeam();
@@ -212,44 +261,61 @@ export function solveTurn(input: SolveInput): SolveResult {
 			const zoro = sample.sets.find(s => s.species.startsWith('Zoroark'));
 			if (zoro) state = withZoroarkAs(state, themId, sample.zoroarkIdent, zoro.species);
 		}
+		const det: Determinization = { state, teams: { [input.me]: input.myTeam, [themId]: sample.sets } as Record<SideId, PokemonSet[]>, seed: o.seed * 1000 + k };
 		try {
-			const { battle } = reconstructBattle({ state, teams: { [input.me]: input.myTeam, [themId]: sample.sets } as never, seed: o.seed * 1000 + k });
-			if (legalChoices(battle, me).length && legalChoices(battle, them).length) battles.push(battle);
+			const battle = buildDeterminization(det);
+			if (legalChoices(battle, me).length && legalChoices(battle, them).length) { dets.push(det); battles.push(battle); }
 		} catch {
 			// A guess the simulator can't represent: skip it.
 		}
 	}
 	if (!battles.length) throw new Error('Could not rebuild the battle for any guess of their team');
+	return { o, me, them, dets, battles, rng, t0 };
+}
+
+/**
+ * The search as a sequence of batches: each `yield` hands over cells to simulate and receives
+ * their scores, so the same search runs in-process or across worker threads.
+ */
+function* search(p: Prepared): Generator<Cell[], SolveResult, number[]> {
+	const { o, me, them, battles, rng } = p;
 	const weights = battles.map(() => 1 / battles.length);
 	const myLegal = legalChoices(battles[0]!, me);
+	let simulations = 0;
+	const meanOf = (values: number[]) => {
+		const ok = values.filter(v => !Number.isNaN(v));
+		return ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : -Infinity;
+	};
 
-	// 2. Narrow our options against a few random replies per guess; then theirs against ours.
+	// 1. Narrow our options against a few random replies per guess.
 	const replies = battles.map(b => {
 		const legal = legalChoices(b, them);
 		return Array.from({ length: Math.min(o.replies, legal.length) }, () => legal[Math.floor(rng() * legal.length)]!);
 	});
-	const avg = (fn: (b: Battle, k: number) => number[]) => {
-		let s = 0, n = 0;
-		battles.forEach((b, k) => { for (const v of fn(b, k)) if (!Number.isNaN(v)) { s += v; n++; } });
-		return n ? s / n : -Infinity;
-	};
-	const mine = narrow(myLegal, c => avg((b, k) => replies[k]!.map(r => { simulations++; return playCell(b, me, c, r); })), o.perSlot, o.keep);
-	const theirs = battles.map(b => {
-		const legal = legalChoices(b, them);
-		const probes = mine.slice(0, Math.min(3, mine.length));
-		return narrow(legal, c => {
-			let s = 0;
-			for (const m of probes) { simulations++; s -= playCell(b, me, m, c) || 0; }
-			return s / probes.length;
-		}, o.perSlot, o.keep);
-	});
+	const probesMine = narrowProbes(myLegal, o.keep);
+	const cells1: Cell[] = probesMine.flatMap(c => battles.flatMap((_, k) => replies[k]!.map(r => [k, c, r] as Cell)));
+	const v1 = cells1.length ? yield cells1 : [];
+	simulations += cells1.length;
+	const byChoice = new Map<string, number[]>();
+	cells1.forEach((cell, i) => { const a = byChoice.get(cell[1]) ?? []; a.push(v1[i]!); byChoice.set(cell[1], a); });
+	const mine = narrowPick(myLegal, c => meanOf(byChoice.get(c) ?? []), o.perSlot, o.keep);
+
+	// 2. Narrow theirs in each guess against our best few.
+	const probes = mine.slice(0, Math.min(3, mine.length));
+	const theirLegal = battles.map(b => legalChoices(b, them));
+	const cells2: Cell[] = theirLegal.flatMap((legal, k) => narrowProbes(legal, o.keep).flatMap(c => probes.map(m => [k, m, c] as Cell)));
+	const v2 = cells2.length ? yield cells2 : [];
+	simulations += cells2.length;
+	const theirScore = new Map<string, number>(); // key k|choice -> sum of -value (NaN as 0)
+	cells2.forEach((cell, i) => { const key = `${cell[0]}|${cell[2]}`; theirScore.set(key, (theirScore.get(key) ?? 0) - (v2[i]! || 0)); });
+	const theirs = theirLegal.map((legal, k) => narrowPick(legal, c => (theirScore.get(`${k}|${c}`) ?? 0) / probes.length, o.perSlot, o.keep));
 
 	// 3. Payoff matrices.
-	const matrices = battles.map((b, k) => mine.map(m => theirs[k]!.map(t => {
-		simulations++;
-		const v = playCell(b, me, m, t);
-		return Number.isNaN(v) ? 0 : v;
-	})));
+	const cells3: Cell[] = battles.flatMap((_, k) => mine.flatMap(m => theirs[k]!.map(t => [k, m, t] as Cell)));
+	const v3 = yield cells3;
+	simulations += cells3.length;
+	let idx = 0;
+	const matrices = battles.map((_, k) => mine.map(() => theirs[k]!.map(() => { const v = v3[idx++]!; return Number.isNaN(v) ? 0 : v; })));
 
 	// 4. Solve.
 	const sol = solveGame(matrices, weights, o.iterations);
@@ -261,5 +327,29 @@ export function solveTurn(input: SolveInput): SolveResult {
 		opp.set(label, (opp.get(label) ?? 0) + weights[k]! * sol.ys[k]![j]!);
 	}));
 	const opponent = [...opp].map(([label, p]) => ({ label, p })).sort((a, b) => b.p - a.p).slice(0, 8);
-	return { options, value: sol.value, opponent, samples: battles.length, simulations, ms: performance.now() - t0, reference: battles[0]! };
+	return { options, value: sol.value, opponent, samples: battles.length, simulations, ms: performance.now() - p.t0, reference: battles[0]! };
+}
+
+/** One-turn search in this thread. */
+export function solveTurn(input: SolveInput): SolveResult {
+	const p = prepare(input);
+	const gen = search(p);
+	let step = gen.next();
+	while (!step.done) step = gen.next(step.value.map(cell => runCell(p.battles, p.me, cell)));
+	return step.value;
+}
+
+/**
+ * One-turn search with the simulations spread over a pool of worker threads (same result as
+ * `solveTurn` for the same input and seed).
+ */
+export async function solveTurnParallel(input: SolveInput, pool: { setup(dets: Determinization[], me: SideIndex): CellRunner }): Promise<SolveResult> {
+	const p = prepare(input);
+	const run = pool.setup(p.dets, p.me);
+	const gen = search(p);
+	let step = gen.next();
+	while (!step.done) step = gen.next(await run(step.value));
+	const res = step.value;
+	res.ms = performance.now() - p.t0;
+	return res;
 }
