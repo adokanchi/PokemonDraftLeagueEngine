@@ -1,12 +1,25 @@
 /**
- * Single entry point to the pinned Pokémon Showdown simulator.
+ * Single entry point to the pinned Pokémon Showdown simulator (git submodule at
+ * vendor/pokemon-showdown, built by `npm run setup`).
  *
- * Showdown ships CommonJS; Node's ESM loader can't see its named exports, so we import the
+ * Showdown ships CommonJS; Node's ESM loader can't see its named exports, so we load the
  * module object once here and re-export typed values. Everything else in the engine imports
  * Showdown through this file.
  */
-import PS from 'pokemon-showdown';
-import type * as PST from 'pokemon-showdown';
+import { createRequire } from 'node:module';
+import type * as PST from '../vendor/pokemon-showdown/dist/sim/index.js';
+
+function loadShowdown(): typeof PST {
+	const require = createRequire(import.meta.url);
+	try {
+		return require('../vendor/pokemon-showdown/dist/sim/index.js') as typeof PST;
+	} catch (e) {
+		if ((e as { code?: string }).code !== 'MODULE_NOT_FOUND') throw e;
+		throw new Error('Pokémon Showdown is not set up yet. Run `npm run setup` (after `npm install`), then try again.');
+	}
+}
+
+const PS = loadShowdown();
 
 export const Battle = PS.Battle;
 export type Battle = PST.Battle;

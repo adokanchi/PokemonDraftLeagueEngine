@@ -9,6 +9,7 @@
   },
   "scripts": {
     "setup": "node scripts/setup-showdown.mjs",
+    "pretest": "node scripts/check-setup.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -18,9 +19,6 @@
     "check-parser": "tsx scripts/check-parser.ts",
     "check-illusion": "tsx scripts/check-illusion.ts",
     "fetch-usage": "tsx scripts/fetch-usage.ts"
-  },
-  "dependencies": {
-    "pokemon-showdown": "file:vendor/pokemon-showdown"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

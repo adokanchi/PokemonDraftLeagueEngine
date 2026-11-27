@@ -10,17 +10,20 @@ and tested. The turn solver is next.
 
 ## Setup
 
-Requires **Node.js 22+** and **Git**. Works on Windows, macOS and Linux.
+Requires **Node.js 22+** and **Git**. Works on Windows, macOS and Linux. Run these once, in order,
+from the project folder:
 
 ```sh
-git clone --recurse-submodules https://github.com/adokanchi/PokemonDraftLeagueEngine.git
+git clone https://github.com/adokanchi/PokemonDraftLeagueEngine.git
 cd PokemonDraftLeagueEngine
-npm install
-npm run setup      # fetches and builds the pinned Pokémon Showdown simulator (~1 min)
+npm install        # installs the dev tools (vitest, tsx, TypeScript)
+npm run setup      # fetches and builds the pinned Pokémon Showdown simulator (~1-2 min)
 npm test
 ```
 
-If you cloned without `--recurse-submodules`, `npm run setup` fetches the submodule for you.
+After pulling new changes, run `npm install` again, plus `npm run setup` if the Showdown version
+changed. If `npm test` says setup isn't finished, it tells you which step is missing.
+(`'vitest' is not recognized` means `npm install` hasn't been run in this folder.)
 
 ## Commands
 
