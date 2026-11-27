@@ -1,0 +1,10 @@
+{
+  "a": {
+    "coach": "Example A",
+    "pokemon": ["Mega Garchomp Z", "Incineroar", "Rillaboom", "Farigiraf", "Kingambit", "Sneasler", "Primarina", "Corviknight", "Whimsicott", "Tyranitar"]
+  },
+  "b": {
+    "coach": "Example B",
+    "pokemon": ["Charizard-Mega-Y", "Floette-Mega", "Sinistcha", "Archaludon", "Pelipper", "Basculegion", "Gholdengo", "Dragonite", "Hatterene"]
+  }
+}
