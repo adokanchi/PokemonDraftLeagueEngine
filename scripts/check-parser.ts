@@ -26,7 +26,7 @@ for (let seed = first; seed < first + n; seed++) {
 				for (const m of checkAgainstTruth(battle, persp)) {
 					counts[m.kind] = (counts[m.kind] ?? 0) + 1;
 					const ex = (examples[m.kind] ??= []);
-					if (ex.length < 4) ex.push(`seed ${seed} ${persp ?? 'spectator'} ${m.detail}`);
+					if (ex.length < 12) ex.push(`seed ${seed} ${persp ?? 'spectator'} ${m.detail}`);
 				}
 			}
 		}

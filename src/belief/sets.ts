@@ -6,7 +6,8 @@
  * when available, Smogon usage stats. Candidates always respect the hard facts (revealed moves,
  * ability and item; item clause; drafted Mega stones; earlier games of the set) and are
  * weighted by soft evidence:
- *  - damage our attacks did to them, and theirs did to us (Showdown's own damage formula);
+ *  - damage our attacks did to them, and theirs did to us (Showdown's own damage formula, run
+ *    on the whole field at the moment of each hit; see damage.ts and hits.ts);
  *  - turn order against our Pokémon (their speed and priority).
  * Illusion is handled by the IllusionTracker: reveals are credited to Zoroark or to the shown
  * species only when it is clear which one it was.
@@ -19,7 +20,8 @@ import { loadPrior, UniformPrior, type SetPrior } from '../data/priors.js';
 import type { TeamKnowledge } from '../state/knowledge.js';
 import type { MonState, SideId } from '../state/types.js';
 import { IllusionTracker } from './illusion.js';
-import { DamageCalc, type CombatantState } from './damage.js';
+import { DamageCalc } from './damage.js';
+import { fits, HitRecorder, skipReason, type HitObservation } from './hits.js';
 import { makeRng } from '../sim/play.js';
 import { seedFromInt } from '../sim/battle.js';
 
@@ -41,25 +43,12 @@ interface Facts {
 	item?: string;
 }
 
-interface HitObservation {
-	kind: 'ourHit' | 'theirHit';
-	/** Species (team forme) of the opponent Pokémon involved. */
+/** A hit that tells us something about one of their Pokémon's set. */
+interface Observation {
+	hit: HitObservation;
+	/** That Pokémon: its team species and ident. */
 	species: string;
-	move: string;
-	crit: boolean;
-	spread: boolean;
-	weather?: string;
-	terrain?: string;
-	/** Our Pokémon's set and state. */
-	ours: CombatantState;
-	/** Opponent Pokémon's state (set filled per candidate). */
-	theirs: Omit<CombatantState, 'set'>;
-	/** Observed HP lost, in % of max (theirs) or exact HP (ours, when known). */
-	lost: number;
-	lostExact: boolean;
-	fainted: boolean;
-	/** HP % before the hit (for Focus Sash / Sturdy). */
-	beforePct: number;
+	ident: string;
 }
 
 export interface OpponentModelOptions {
@@ -90,8 +79,10 @@ export class OpponentModel {
 	private generator: { randomSet(species: string, teamDetails: object, isLead: boolean, isDoubles: boolean): PokemonSet };
 	private facts = new Map<string, Facts>();
 	private pools = new Map<string, Candidate[]>();
-	private observations: HitObservation[] = [];
-	private pendingMove?: { ident: string; side: SideId; move: string; spread: boolean; crits: Set<string>; snapshot: string };
+	private observations: Observation[] = [];
+	private recorder: HitRecorder;
+	/** Stand-in sets for species without a pool yet (as partners on the field in a damage calc). */
+	private quickGuesses = new Map<string, PokemonSet | undefined>();
 	private poolSize: number;
 
 	constructor(private opts: OpponentModelOptions) {
@@ -111,6 +102,7 @@ export class OpponentModel {
 			knowledge: opts.knowledge, megaStones: opts.megaStones,
 			onReveal: (e, slot, pZ) => this.onReveal(e.mon, e.type, e.type === 'ability' ? e.ability : e.type === 'item' ? e.item : e.move, pZ),
 		});
+		this.recorder = new HitRecorder(() => this.state, hit => this.onHit(hit));
 	}
 
 	get state() { return this.illusion.parser.state; }
@@ -135,27 +127,12 @@ export class OpponentModel {
 			this.splitSkip = keep ? 1 : 0;
 			if (!keep) { this.illusion.feed(line); return; }
 		} else if (this.splitSkip > 0) { this.splitSkip--; this.illusion.feed(line); return; }
-		const parts = line.slice(1).split('|');
-		const cmd = parts[0] ?? '';
-		// Before the parser applies the line: remember the context of each move and HP before hits.
-		let hitBefore: { mon: MonState; hp: number; maxHp: number } | undefined;
-		if (cmd === 'move') {
-			const user = this.monAt(parts[1]);
-			this.pendingMove = user && !/\[from\]/.test(line) ? {
-				ident: user.ident, side: user.side, move: parts[2] ?? '', spread: /\[spread\]/.test(line), crits: new Set(),
-				snapshot: JSON.stringify(this.state),
-			} : undefined;
-		} else if (cmd === '-crit' && this.pendingMove && parts[1]) {
-			this.pendingMove.crits.add(parts[1]);
-		} else if (cmd === '-damage' && !/\[from\]/.test(line) && this.pendingMove) {
-			const t = this.monAt(parts[1]);
-			if (t && t.ident !== this.pendingMove.ident) hitBefore = { mon: t, hp: t.hp, maxHp: t.maxHp };
-		} else if (cmd === 'turn' || cmd === 'upkeep') {
-			this.pendingMove = undefined;
-		}
+		this.recorder.before(line);
 		this.illusion.feed(line);
-		if (hitBefore && this.pendingMove) this.recordHit(hitBefore, parts[1]!);
 	}
+
+	/** Call at the end of a log that stops mid-turn, to score that turn's hits too. */
+	flush() { this.recorder.flush(); }
 
 	private monAt(pos: string | undefined): MonState | undefined {
 		const m = /^(p[12])([ab]): /.exec(pos ?? '');
@@ -187,58 +164,45 @@ export class OpponentModel {
 		return undefined;
 	}
 
-	private recordHit(before: { mon: MonState; hp: number; maxHp: number }, targetPos: string) {
-		const pm = this.pendingMove!;
-		const snap = JSON.parse(pm.snapshot) as typeof this.state;
-		const target = before.mon;
-		const attackerSide = pm.side;
-		const find = (side: SideId, ident: string) => snap.sides[side].pokemon.find(p => p.ident === ident);
-		const attacker = find(attackerSide, pm.ident);
-		const defender = find(target.side, target.ident);
-		if (!attacker || !defender || attacker.transformedInto || defender.transformedInto) return;
-		const move = this.format.dex.moves.get(pm.move);
-		if (!move.exists || move.category === 'Status' || move.damageCallback || move.ohko || move.multihit) return;
-		const state = (m: MonState) => ({
-			species: m.species, boosts: m.boosts, hpFraction: m.hp / m.maxHp, status: m.status,
-			item: m.item.current === '' ? '' : m.item.swapped ? m.item.current : undefined,
-			sideConditions: Object.keys(snap.sides[m.side].conditions),
-		});
-		const after = target.hp;
-		const base = { move: move.id, crit: pm.crits.has(targetPos), spread: pm.spread, weather: snap.field.weather, terrain: snap.field.terrain, fainted: target.fainted || after === 0 };
-		if (attackerSide !== this.side && target.side === this.side) {
-			const ours = this.ownSetFor(attacker);
-			const species = this.clearSpecies(target);
-			if (!ours || !species || before.maxHp !== 100) return;
-			this.addObservation({ ...base, kind: 'ourHit', species, ours: { set: ours, ...state(attacker) }, theirs: state(defender), lost: before.hp - after, lostExact: false, beforePct: before.hp });
-		} else if (attackerSide === this.side && target.side !== this.side) {
-			const ours = this.ownSetFor(target);
-			const species = this.clearSpecies(attacker);
-			if (!ours || !species) return;
-			const exact = before.maxHp !== 100;
-			this.addObservation({ ...base, kind: 'theirHit', species, ours: { set: ours, ...state(defender) }, theirs: state(attacker), lost: before.hp - after, lostExact: exact, beforePct: 100 * before.hp / before.maxHp });
-		}
-	}
-
-	private addObservation(o: HitObservation) {
+	/** A hit between us and them: evidence about the set of their Pokémon involved. */
+	private onHit(hit: HitObservation) {
+		if (skipReason(hit, this.format)) return;
+		const side = (ident: string) => ident.slice(0, 2) as SideId;
+		const find = (ident: string) => hit.state.sides[side(ident)].pokemon.find(p => p.ident === ident);
+		const attacker = find(hit.attacker), defender = find(hit.defender);
+		if (!attacker || !defender || side(hit.attacker) === side(hit.defender)) return;
+		const theirs = side(hit.attacker) === this.side ? attacker : defender;
+		const ours = theirs === attacker ? defender : attacker;
+		if (!this.ownSetFor(ours)) return;
+		const species = this.clearSpecies(theirs);
+		if (!species) return;
+		const o: Observation = { hit, species, ident: theirs.ident };
 		this.observations.push(o);
-		const pool = this.pools.get(o.species);
+		const pool = this.pools.get(species);
 		if (pool) for (const c of pool) c.logw += Math.log(this.hitLikelihood(o, c.set));
 	}
 
-	private hitLikelihood(o: HitObservation, set: PokemonSet): number {
+	/** Sets for everyone on the field in this hit: ours, the candidate, best guesses for their partner. */
+	private setsFor(o: Observation, candidate: PokemonSet) {
+		return (mon: MonState): PokemonSet | undefined => {
+			if (mon.side !== this.side) return this.ownSetFor(mon);
+			if (mon.ident === o.ident) return candidate;
+			const species = this.clearSpecies(mon);
+			return species ? this.bestGuess(species) : undefined;
+		};
+	}
+
+	/** Current most likely set for a species (without building a pool, to avoid recursion). */
+	private bestGuess(species: string): PokemonSet | undefined {
+		const pool = this.pools.get(species);
+		if (pool?.length) return pool.reduce((a, b) => (b.logw + Math.log(b.prior) > a.logw + Math.log(a.prior) ? b : a)).set;
+		if (!this.quickGuesses.has(species)) this.quickGuesses.set(species, this.makeCandidate(species));
+		return this.quickGuesses.get(species);
+	}
+
+	private hitLikelihood(o: Observation, set: PokemonSet): number {
 		try {
-			const theirs = { ...o.theirs, set };
-			const ctx = { crit: o.crit, spread: o.spread, weather: o.weather, terrain: o.terrain };
-			const r = o.kind === 'ourHit' ? this.calc.range(o.ours, theirs, o.move, ctx) : this.calc.range(theirs, o.ours, o.move, ctx);
-			if (r.immune) return MISFIT;
-			const scale = o.lostExact ? 1 : 100 / r.maxHp;
-			const lo = r.min * scale - (o.lostExact ? 1 : 1.5);
-			const hi = r.max * scale + (o.lostExact ? 1 : 1.5);
-			if (o.fainted) return hi >= o.lost ? 1 : MISFIT;
-			if (o.lost >= lo && o.lost <= hi) return 1;
-			// Survived a hit that should have KO'd from full: Focus Sash / Sturdy.
-			if (o.kind === 'ourHit' && o.beforePct >= 100 && o.lost >= 98 && (toID(set.item) === 'focussash' || toID(set.ability) === 'sturdy')) return 1;
-			return MISFIT;
+			return fits(o.hit, this.calc.range(o.hit, this.setsFor(o, set))) ? 1 : MISFIT;
 		} catch {
 			return 1;
 		}
@@ -334,13 +298,41 @@ export class OpponentModel {
 	}
 
 	private sampleFromGenerator(species: string): PokemonSet | undefined {
+		const dex = this.format.dex;
 		const stone = this.opts.megaStones?.[species];
-		const key = stone ? this.format.dex.items.get(stone).megaStone?.[species] ?? species : species;
-		try { return this.generator.randomSet(key, {}, false, true); } catch { return undefined; }
+		const key = stone ? dex.items.get(stone).megaStone?.[species] ?? species : species;
+		// Cosmetic and minor formes (Vivillon patterns, Furfrou trims, Squawkabilly colours...) aren't in
+		// the random-set data: use the base species' sets, with an ability this forme can have.
+		const sp = dex.species.get(species);
+		for (const k of [key, sp.baseSpecies]) {
+			let set: PokemonSet;
+			try { set = this.generator.randomSet(k, {}, false, true); } catch { continue; }
+			const legal = Object.values(sp.abilities ?? {}).map(a => toID(a as string));
+			if (legal.length && !legal.includes(toID(set.ability))) set.ability = legal[Math.floor(this.rng() * legal.length)]!;
+			return set;
+		}
+		return undefined;
+	}
+
+	/** Last resort for a species with no curated sets or usage: any legal ability, item and moves. */
+	private sampleFromLegal(species: string): PokemonSet | undefined {
+		const sp = this.format.dex.species.get(species);
+		if (!sp.exists) return undefined;
+		const abilities = Object.values(sp.abilities ?? {}) as string[];
+		const learn = [...this.uniform.learnset(species)];
+		if (!learn.length) return undefined;
+		const moves: string[] = [];
+		while (moves.length < 4 && learn.length) moves.push(learn.splice(Math.floor(this.rng() * learn.length), 1)[0]!);
+		const items = [...this.uniform.itemProbs(species).keys()].filter(i => i && !this.format.dex.items.get(i).megaStone);
+		return {
+			name: species, species, item: items[Math.floor(this.rng() * items.length)] ?? '', ability: abilities[Math.floor(this.rng() * abilities.length)] ?? '',
+			moves, nature: 'Hardy', gender: '', level: 50, evs: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 }, ivs: { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 },
+		} as PokemonSet;
 	}
 
 	private makeCandidate(species: string): PokemonSet | undefined {
-		const base = (this.prior.hasUsage && this.rng() < 0.7 ? this.sampleFromUsage(species) : undefined) ?? this.sampleFromGenerator(species) ?? this.sampleFromUsage(species);
+		const base = (this.prior.hasUsage && this.rng() < 0.7 ? this.sampleFromUsage(species) : undefined) ?? this.sampleFromGenerator(species)
+			?? this.sampleFromUsage(species) ?? this.sampleFromLegal(species);
 		if (!base) return undefined;
 		const f = this.factsFor(species);
 		const dex = this.format.dex;

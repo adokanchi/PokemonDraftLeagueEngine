@@ -71,6 +71,23 @@ export function checkAgainstTruth(battle: Battle, perspective?: SideId): Mismatc
 				for (const [stat, v] of Object.entries(p.boosts)) {
 					if ((m.boosts[stat as never] ?? 0) !== v) add('boosts', `${who} ${stat}: ${m.boosts[stat as never] ?? 0} vs ${v}`);
 				}
+				// Per-stint state the rebuild and the damage model rely on.
+				if ((m.stint?.timesAttacked ?? 0) !== p.timesAttacked) add('timesattacked', `${who}: ${m.stint?.timesAttacked} vs ${p.timesAttacked}`);
+				const types = m.volatiles.typechange?.types ?? [...battle.dex.species.get(m.species).types];
+				const parsed = [...types, ...(m.volatiles.typeadd?.types ?? [])].join('/');
+				if (!p.transformed && parsed !== p.getTypes(true).join('/')) add('types', `${who}: ${parsed} vs ${p.getTypes(true).join('/')}`);
+				for (const v of ['partiallytrapped', 'trapped', 'twoturnmove', 'lockedmove', 'disable', 'charge']) {
+					if (!!m.volatiles[v] !== !!p.volatiles[v]) add(`volatile-${v}`, `${who}: ${!!m.volatiles[v]} vs ${!!p.volatiles[v]}`);
+				}
+				const dm = m.volatiles.disable?.move, rm = p.volatiles.disable?.move;
+				if (dm && rm && dm !== rm) add('disable-move', `${who}: ${dm} vs ${rm}`);
+				const lm = m.volatiles.lockedmove?.move ?? m.volatiles.twoturnmove?.move, rl = p.volatiles.lockedmove?.move ?? p.volatiles.twoturnmove?.move;
+				if (lm && rl && lm !== rl) add('locked-move', `${who}: ${lm} vs ${rl}`);
+				// (Compared at the start of a turn: Showdown only moves this turn's result to "last turn" then.)
+				const midTurn = battle.sides.some(s => s.activeRequest?.forceSwitch);
+				const failed = m.failedTurn !== undefined && m.failedTurn === battle.turn - 1;
+				if (!midTurn && failed !== (p.moveLastTurnResult === false)) add('failed-last-turn', `${who}: ${failed} vs ${p.moveLastTurnResult}`);
+				if (!p.transformed && (m.lastMove ?? null) !== (p.lastMove?.id ?? null)) add('lastmove', `${who}: ${m.lastMove} vs ${p.lastMove?.id}`);
 			}
 			if (illusion || p.transformed) continue;
 			const realMoves = new Set([...p.baseMoveSlots, ...p.moveSlots].map(s => s.id));

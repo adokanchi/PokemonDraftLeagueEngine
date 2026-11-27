@@ -12,6 +12,17 @@ import type { BoostId, KnownBattleState, MonState, SideId, SideState } from './t
 const BOOSTS: BoostId[] = ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'];
 const ITEM_SWAP_MOVES = new Set(['trick', 'switcheroo', 'thief', 'covet', 'bestow', 'fling']);
 const TERRAINS = new Set(['electricterrain', 'grassyterrain', 'mistyterrain', 'psychicterrain']);
+/** Lines that mean the current move did nothing to a target. */
+const FAILURE_LINES = new Set(['-fail', '-miss', '-immune', '-notarget', '-block']);
+const ENDING_LINES = new Set(['-end', '-sideend', '-fieldend']);
+/** Abilities that take a move in instead of being hit by it (the move fails, as in Showdown). */
+const ABSORBING = new Set(['lightningrod', 'stormdrain', 'sapsipper', 'motordrive', 'wellbakedbody', 'windrider', 'flashfire',
+	'voltabsorb', 'waterabsorb', 'dryskin', 'eartheater', 'telepathy']);
+/** Lines that mean the current move did something. (Protect blocking is neither, as in Showdown.) */
+const EFFECT_LINES = new Set(['-damage', '-heal', '-sethp', '-status', '-curestatus', '-cureteam', '-boost', '-unboost', '-setboost',
+	'-clearboost', '-clearpositiveboost', '-clearnegativeboost', '-clearallboost', '-invertboost', '-copyboost', '-swapboost',
+	'-weather', '-fieldstart', '-fieldend', '-sidestart', '-sideend', '-swapsideconditions', '-start', '-end', '-item', '-enditem',
+	'-transform', '-singleturn', '-singlemove', '-formechange', '-clearnegativeboost', 'swap']);
 
 /** Reveals the parser attributes to a Pokémon, as they happen (for belief tracking). */
 export type ParserEvent =
@@ -76,6 +87,19 @@ export class BattleLogParser {
 	private batonPass: Record<SideId, ({ boosts: MonState['boosts']; volatiles: MonState['volatiles'] } | undefined)[]> = { p1: [], p2: [] };
 	/** "Bug Bite/Pluck ate the target's berry": the eater's next "[from] item: X" isn't its own item. */
 	private stolenBerry?: { mon: MonState; item: string };
+	/** The move being executed right now (for hits taken, failure, Outrage-style locks, trapping). */
+	private cur?: {
+		user: MonState; id: string; succeeded: boolean; failed: boolean; fatigue: boolean; locked: boolean;
+		/** Pokémon the move reached. */
+		targets: Set<MonState>;
+		/** Targets whose ability took the move instead (Lightning Rod, Sap Sipper...): their boosts aren't the move working. */
+		absorbed: Set<MonState>;
+		bounced?: boolean;
+		/** Hits landed on each Pokémon. */
+		hits: Map<MonState, number>;
+		/** The Pokémon whose ability is announcing stat changes right now. */
+		abilityBoosting?: MonState;
+	};
 	done = false;
 
 	constructor(private opts: ParseOptions = {}) {
@@ -231,6 +255,7 @@ export class BattleLogParser {
 
 	private loseItem(mon: MonState | undefined, item: string, via: NonNullable<MonState['item']['lostVia']>) {
 		if (!mon) return;
+		if (mon.stint && mon.activeSlot !== null) { mon.stint.itemChangedSinceMove = true; mon.stint.itemLost = true; }
 		const id = toID(item);
 		if (!mon.item.swapped) this.opts.onEvent?.({ type: 'item', mon, item: id, how: 'lost' });
 		if (!mon.item.swapped && mon.item.original === undefined) mon.item.original = id;
@@ -309,6 +334,10 @@ export class BattleLogParser {
 		mon.seen = true;
 		mon.activeSlot = slot;
 		mon.switchedInTurn = this.state.turn;
+		mon.lastMove = undefined;
+		mon.lastMoveTurn = undefined;
+		mon.stint = { timesAttacked: mon.revivedHits ?? 0, moves: {}, faintedAllies: side.pokemon.filter(p => p.fainted && !p.ident.endsWith('#illusion')).length };
+		mon.revivedHits = undefined;
 		side.active[slot] = mon.ident;
 		this.setHp(mon, hp);
 		const passed = this.batonPass[pos.side][slot];
@@ -366,6 +395,8 @@ export class BattleLogParser {
 				real.hp = shown.hp; real.maxHp = shown.maxHp; real.hpColor = shown.hpColor;
 				real.status = shown.status; real.statusSince = shown.statusSince;
 				real.boosts = shown.boosts; real.volatiles = shown.volatiles;
+				real.stint = shown.stint; real.switchedInTurn = shown.switchedInTurn;
+				real.lastMove = shown.lastMove; real.lastMoveTurn = shown.lastMoveTurn;
 				for (const [id, m] of Object.entries(shown.moves)) {
 					const delta = m.uses - (snap?.moves[id]?.uses ?? 0);
 					if (delta > 0 || !snap?.moves[id]) (real.moves[id] ??= { uses: 0 }).uses += Math.max(0, delta);
@@ -385,6 +416,7 @@ export class BattleLogParser {
 	}
 
 	private switchOut(mon: MonState) {
+		this.releaseTrapsBy(mon);
 		mon.activeSlot = null;
 		// Temporary formes (Stance Change, Hunger Switch, Transform...) revert on switching out.
 		mon.transformedInto = undefined;
@@ -392,6 +424,48 @@ export class BattleLogParser {
 		mon.boosts = {};
 		mon.volatiles = {};
 		if (mon.status === 'tox') mon.statusSince = undefined;
+		// A changed ability (Trace, Mummy, Skill Swap...) reverts when it leaves the field.
+		if (mon.abilityChanged) { mon.ability = mon.baseAbility; mon.abilityChanged = false; mon.abilityFrom = undefined; }
+	}
+
+	/** Mean Look / Block / Spirit Shackle trapping ends when the trapper leaves the field. */
+	private releaseTrapsBy(mon: MonState) {
+		for (const s of Object.values(this.state.sides)) {
+			for (const p of s.pokemon) if (p.volatiles.trapped?.source === mon.ident) delete p.volatiles.trapped;
+		}
+	}
+
+	/** Finish bookkeeping for the move that just ran: did it fail, does an Outrage-style lock go on? */
+	private endMove() {
+		const c = this.cur;
+		if (!c) return;
+		this.cur = undefined;
+		// (Showdown keeps only the result of a Pokémon's latest move this turn.)
+		if ((c.failed && !c.succeeded) || c.bounced) c.user.failedTurn = this.state.turn;
+		else if (c.user.failedTurn === this.state.turn) c.user.failedTurn = undefined;
+		if (c.locked) {
+			const lock = c.user.volatiles.lockedmove;
+			if (c.succeeded && !c.fatigue) {
+				c.user.volatiles.lockedmove = { since: lock?.since ?? this.state.turn, move: c.id, count: (lock?.count ?? 0) + 1 };
+			} else {
+				delete c.user.volatiles.lockedmove;
+			}
+		}
+	}
+
+	private activeAt(side: SideId, slot: number): MonState | undefined {
+		const ident = this.state.sides[side].active[slot];
+		return ident ? this.state.sides[side].pokemon.find(p => p.ident === ident) : undefined;
+	}
+
+	private typesOf(mon: MonState | undefined): string[] | undefined {
+		if (!mon) return undefined;
+		return mon.volatiles.typechange?.types ?? [...this.format.dex.species.get(mon.species).types];
+	}
+
+	/** Something happened to a Pokémon during the current move: it worked on at least one target. */
+	private moveDidSomething(target: MonState | undefined) {
+		if (this.cur && target && target !== this.cur.user) this.cur.succeeded = true;
 	}
 
 	// ---- main dispatch -------------------------------------------------------------------------
@@ -403,6 +477,41 @@ export class BattleLogParser {
 		const st = this.state;
 		const target = (cmd.startsWith('-') || ['move', 'cant', 'faint', 'detailschange', 'swap'].includes(cmd)) ? this.mon(args[0]) : undefined;
 
+		// What the current move did: hits taken (Rage Fist), and whether it worked at all.
+		if (this.cur) {
+			// (Psychic Terrain stopping a priority move is a failure; Protect blocking isn't, as in Showdown.)
+			const ability = cmd === '-ability' && !tags.from ? toID(args[1] ?? '') : /^ability:/i.test(args[1] ?? '') && ['-activate', '-start'].includes(cmd) ? toID(effectOf(args[1])!.name) : '';
+			if (target && target !== this.cur.user && ABSORBING.has(ability) && this.cur.targets.has(target)) {
+				this.cur.absorbed.add(target);
+				this.cur.failed = true;
+			}
+			// "-fail|X|heal" at full HP: a failure for Recover or Rest, but not for moves that heal in their own
+			// hit handler (Moonlight, Synthesis...), which Showdown counts as having worked.
+			const mv = this.format.dex.moves.get(this.cur.id);
+			const healStillWorked = cmd === '-fail' && args[1] === 'heal' && !!mv.onHit && !mv.heal && !mv.onTry;
+			// A stat change of 0 (Swords Dance at +6) is the move failing.
+			const noChange = (cmd === '-boost' || cmd === '-unboost') && args[2] === '0';
+			// Boosts announced by an ability (Speed Boost at the end of the turn, Defiant, Justified...) aren't the move working.
+			const abilityBoost = (cmd === '-boost' || cmd === '-unboost') && !!target && this.cur.abilityBoosting === target;
+			if (cmd === '-ability' && args[2] === 'boost') this.cur.abilityBoosting = target;
+			else if (cmd !== '-boost' && cmd !== '-unboost') this.cur.abilityBoosting = undefined;
+			if ((FAILURE_LINES.has(cmd) && !healStillWorked) || noChange || (cmd === '-activate' && toID(args[1] ?? '') === 'movepsychicterrain')) this.cur.failed = true;
+			else if (abilityBoost) { /* not the move */ }
+			// Effects on what the move reached (or on the field), but not Protean/Libero changing the
+			// user's type before it can miss, and not end-of-turn effects.
+			// Lines with a [from] tag are side effects (Leftovers, Life Orb, Protean...) unless they name this move.
+			// Things ending (-end, -sideend, -fieldend, weather fading) are usually end-of-turn expiry: only
+			// count them when they name the move (Defog, Brick Break, Rapid Spin).
+			else if (EFFECT_LINES.has(cmd) && !tags.flags.has('upkeep') && !tags.flags.has('silent') && !(target && this.cur.absorbed.has(target))
+				&& (target ? this.cur.targets.has(target) : !args[0]?.match(/^p[12][ab]?:/))
+				&& (tags.from ? toID(effectOf(tags.from)?.name ?? '') === this.cur.id : !ENDING_LINES.has(cmd) && !(cmd === '-weather' && args[0] === 'none'))) this.cur.succeeded = true;
+			const hitOnSub = cmd === '-activate' && tags.flags.has('damage') && /substitute/i.test(args[1] ?? '');
+			if (target && target !== this.cur.user && ((cmd === '-damage' && !tags.from) || hitOnSub) && target.stint) {
+				target.stint.timesAttacked++;
+				this.cur.hits.set(target, (this.cur.hits.get(target) ?? 0) + 1);
+			}
+		}
+
 		switch (cmd) {
 		case 'player': {
 			if (args[0] && args[1] !== undefined && args[1] !== '') this.sideOf(args[0]).name = args[1];
@@ -413,10 +522,24 @@ export class BattleLogParser {
 		case 'clearpoke': st.sides.p1.preview = []; st.sides.p2.preview = []; break;
 		case 'poke': if (args[0] && args[1]) this.sideOf(args[0]).preview.push(this.parseDetails(args[1]).species); break;
 		case 'turn': {
+			this.endMove();
+			for (const s of Object.values(st.sides)) {
+				for (const p of s.pokemon) for (const [k, v] of Object.entries(p.volatiles)) if (v.singleTurn) delete p.volatiles[k];
+			}
 			st.turn = Number(args[0]);
 			this.batonPass = { p1: [], p2: [] };
 			this.stolenBerry = undefined;
 			if (this.opts.stopAtTurn !== undefined && st.turn >= this.opts.stopAtTurn) this.done = true;
+			break;
+		}
+		case 'upkeep': {
+			this.endMove();
+			for (const s of Object.values(st.sides)) {
+				for (const p of s.pokemon) {
+					// An Outrage-style lock ends if it couldn't move this turn or fell asleep.
+					if (p.volatiles.lockedmove && (p.lastMoveTurn !== st.turn || p.status === 'slp')) delete p.volatiles.lockedmove;
+				}
+			}
 			break;
 		}
 		case 'win': st.ended = true; st.winner = args[0]; break;
@@ -425,6 +548,12 @@ export class BattleLogParser {
 		case 'switch': case 'drag': {
 			if (cmd === 'drag' && args[0]) this.batonPass[args[0].slice(0, 2) as SideId] = [];
 			this.switchIn(args[0]!, args[1]!, args[2]);
+			// Shed Tail hands its Substitute to the Pokémon coming in.
+			if (toID(tags.from ?? '') === 'shedtail') {
+				const pos = this.parsePosition(args[0]!);
+				const mon = this.activeAt(pos.side, pos.slot ?? 0);
+				if (mon) mon.volatiles.substitute = { since: st.turn };
+			}
 			break;
 		}
 		case 'replace': {
@@ -436,6 +565,12 @@ export class BattleLogParser {
 				const d = this.parseDetails(args[1]);
 				target.species = d.species;
 				target.permanentSpecies = d.species;
+				// A permanent forme change (Mega Evolution) replaces any copied ability with the new forme's.
+				if (target.abilityChanged) {
+					const abilities = Object.values(this.format.dex.species.get(d.species).abilities ?? {});
+					target.ability = abilities.length === 1 ? toID(abilities[0] as string) : undefined;
+					target.abilityChanged = false;
+				}
 			}
 			break;
 		}
@@ -452,7 +587,15 @@ export class BattleLogParser {
 			break;
 		}
 		case 'faint': {
-			if (target) { target.fainted = true; target.hp = 0; }
+			if (target) {
+				target.fainted = true;
+				target.hp = 0;
+				this.sideOf(args[0]!).lastFaintTurn = st.turn;
+				// Showdown clears the hit counter on fainting, then counts the hits of the move that KO'd it
+				// (what it has if Revival Blessing brings it back).
+				target.revivedHits = this.cur?.hits.get(target) ?? 0;
+				this.releaseTrapsBy(target);
+			}
 			break;
 		}
 
@@ -465,13 +608,47 @@ export class BattleLogParser {
 			if (user && toID(moveName) === 'batonpass' && !tags.flags.has('still') && user.activeSlot !== null) {
 				this.batonPass[user.side][user.activeSlot] = { boosts: { ...user.boosts }, volatiles: structuredClone(user.volatiles) };
 			}
-			if (user && !called && !user.transformedInto && toID(moveName) !== 'struggle') {
+			const bounced = called && /magic bounce|magic coat/i.test(from);
+			if (bounced) {
+				// Reflected: a failure for the original user; how the reflected move goes counts for the reflector.
+				if (this.cur) { this.cur.bounced = true; this.endMove(); }
+				if (user) this.cur = { user, id: toID(moveName), succeeded: false, failed: false, fatigue: false, locked: false, targets: new Set([user, ...[this.mon(args[2])].filter(m => !!m) as MonState[]]), absorbed: new Set(), hits: new Map() };
+			} else if (called && this.cur) {
+				// Called by another move (Metronome, Sleep Talk...): part of the move in progress.
+				if (this.cur.user === user) this.cur.targets.add(this.mon(args[2]) ?? user);
+			} else {
+				this.endMove();
+			}
+			if (user && !called) for (const [k, v] of Object.entries(user.volatiles)) if (v.singleMove) delete user.volatiles[k];
+			if (user && !called && toID(moveName) !== 'struggle') {
 				const id = toID(moveName);
-				user.moves[id] ??= { uses: 0 };
-				user.moves[id]!.uses++;
+				// Releasing a charged move, or continuing an Outrage-style lock, uses no PP.
+				const charged = user.volatiles.twoturnmove?.move === id;
+				const continuing = user.volatiles.lockedmove?.move === id;
+				if (charged) delete user.volatiles.twoturnmove;
+				if (!user.transformedInto && !charged && !continuing) {
+					user.moves[id] ??= { uses: 0 };
+					user.moves[id]!.uses++;
+				}
+				if (!user.transformedInto) this.opts.onEvent?.({ type: 'move', mon: user, move: id });
 				user.lastMove = id;
 				user.lastMoveTurn = st.turn;
-				this.opts.onEvent?.({ type: 'move', mon: user, move: id });
+				if (user.stint) {
+					if (!charged && !continuing) user.stint.moves[id] = (user.stint.moves[id] ?? 0) + 1;
+					user.stint.itemChangedSinceMove = false;
+				}
+				const locks = this.format.dex.moves.get(id).self?.volatileStatus === 'lockedmove';
+				// Who the move reached: its target, the [spread] list, and the user (residual effects of others don't count).
+				const targets = new Set<MonState>([user]);
+				const t = this.mon(args[2]);
+				if (t) targets.add(t);
+				const sideOf = (args[2] ?? '').slice(0, 2) || (user.side === 'p1' ? 'p2' : 'p1');
+				for (const slot of (tags.values.spread ?? '').split(',')) {
+					const m = /^(p[12])([ab])$/.exec(slot.trim()) ?? (/^[ab]$/.test(slot.trim()) ? [slot, sideOf, slot.trim()] : null);
+					const mon = m && this.activeAt(m[1] as SideId, 'ab'.indexOf(m[2]!));
+					if (mon) targets.add(mon);
+				}
+				this.cur = { user, id, succeeded: false, failed: tags.flags.has('notarget') || tags.flags.has('miss'), fatigue: false, locked: locks, targets, absorbed: new Set(), hits: new Map() };
 			}
 			if (from.toLowerCase().startsWith('ability:')) {
 				const eff = effectOf(from)!;
@@ -483,6 +660,10 @@ export class BattleLogParser {
 			// "|cant|HOLDER|ability: Queenly Majesty|MOVE|[of] ATTACKER": the move is the attacker's.
 			const of = this.mon(tags.of);
 			const mover = of ?? target;
+			this.endMove();
+			// Flinch, paralysis, sleep, Taunt, ...: counts as a failed move (Stomping Tantrum). Recharging doesn't.
+			if (mover && !['recharge', 'truant'].includes(toID(args[1] ?? ''))) mover.failedTurn = st.turn;
+			if (mover) for (const [k, v] of Object.entries(mover.volatiles)) if (v.singleMove) delete mover.volatiles[k];
 			if (mover && args[2] && !mover.transformedInto) {
 				const id = toID(args[2]);
 				mover.moves[id] ??= { uses: 0 };
@@ -497,6 +678,11 @@ export class BattleLogParser {
 		}
 
 		case '-damage': case '-heal': case '-sethp': {
+			if (target && cmd === '-damage' && toID(tags.from ?? '') === 'confusion') {
+				// Hurt itself in confusion: that was its action, and it failed.
+				this.endMove();
+				target.failedTurn = st.turn;
+			}
 			if (target) this.setHp(target, args[1]);
 			this.attributeFrom(cmd, target, tags);
 			break;
@@ -617,7 +803,20 @@ export class BattleLogParser {
 			if (target && args[1]) {
 				const eff = effectOf(args[1]);
 				const id = toID(eff?.name ?? args[1]);
-				target.volatiles[id] = { since: st.turn };
+				const info: MonState['volatiles'][string] = { since: st.turn };
+				if (id === 'typechange') {
+					// "-start|X|typechange|Bug/Steel" (Protean, Soak, ...); Reflect Type names no types: copy [of].
+					info.types = args[2] ? args[2].split('/') : this.typesOf(this.mon(tags.of));
+					delete target.volatiles.typeadd;
+				} else if (id === 'typeadd') {
+					info.types = args[2] ? [args[2]] : [];
+				} else if (id === 'disable' && args[2]) {
+					info.move = toID(args[2]);
+				} else if (id === 'confusion' && tags.flags.has('fatigue')) {
+					delete target.volatiles.lockedmove;
+					if (this.cur?.user === target) this.cur.fatigue = true;
+				}
+				target.volatiles[id] = info;
 				if (eff?.kind === 'ability') this.revealAbility(target, eff.name);
 			}
 			this.attributeFrom(cmd, target, tags);
@@ -627,7 +826,7 @@ export class BattleLogParser {
 			if (target && args[1]) {
 				const eff = effectOf(args[1]);
 				const id = toID(eff?.name ?? args[1]);
-				delete target.volatiles[id];
+				delete target.volatiles[tags.flags.has('partiallytrapped') ? 'partiallytrapped' : id];
 				if (eff?.kind === 'ability') this.revealAbility(target, eff.name);
 			}
 			this.attributeFrom(cmd, target, tags);
@@ -639,10 +838,12 @@ export class BattleLogParser {
 				const from = effectOf(tags.from);
 				if (from?.kind === 'move' && ITEM_SWAP_MOVES.has(toID(from.name))) {
 					// Received via Trick etc.: not the original item.
+					if (target.stint) target.stint.itemChangedSinceMove = true;
 					target.item.swapped = true;
 					target.item.current = toID(args[1]);
 					target.item.lostVia = undefined;
 				} else if (from?.kind === 'ability' && ['pickpocket', 'magician', 'pickup', 'harvest'].includes(toID(from.name))) {
+					if (target.stint) target.stint.itemChangedSinceMove = true;
 					target.item.swapped = true;
 					target.item.current = toID(args[1]);
 					this.revealAbility(target, from.name);
@@ -696,6 +897,13 @@ export class BattleLogParser {
 		}
 		case '-activate': {
 			const eff = effectOf(args[1]);
+			if (target && eff && toID(eff.name) === 'trapped') {
+				// Mean Look, Block, Spirit Shackle, ...: lasts while the user of the current move stays in.
+				target.volatiles.trapped = { since: st.turn, source: this.cur?.user.ident };
+			} else if (target && eff?.kind === 'move' && this.format.dex.moves.get(eff.name).volatileStatus === 'partiallytrapped') {
+				// "-activate|X|move: Infestation|[of] SOURCE"
+				target.volatiles.partiallytrapped = { since: st.turn, move: toID(eff.name), source: this.mon(tags.of)?.ident };
+			}
 			if (target && eff) {
 				if (eff.kind === 'ability') {
 					this.revealAbility(target, eff.name);
@@ -721,6 +929,12 @@ export class BattleLogParser {
 					target.ability = got;
 					target.abilityChanged = true;
 					if (other) { other.ability = had; other.abilityChanged = true; }
+					// Track whose original ability each now has (the names are hidden between allies).
+					if (other) {
+						const mine = target.abilityFrom ?? target.ident, theirs = other.abilityFrom ?? other.ident;
+						target.abilityFrom = theirs;
+						other.abilityFrom = mine;
+					}
 				} else if (eff.kind === 'move' && ['trick', 'switcheroo'].includes(toID(eff.name))) {
 					target.item.swapped = true;
 					const other = this.mon(args[2]);
@@ -752,16 +966,44 @@ export class BattleLogParser {
 			const into = this.mon(args[1]);
 			if (target && into) {
 				target.boosts = { ...into.boosts };
+				// Transform copies the target's hit counter (Rage Fist) and type changes too.
+				if (target.stint) target.stint.timesAttacked = into.stint?.timesAttacked ?? 0;
+				if (into.volatiles.typechange) target.volatiles.typechange = { ...into.volatiles.typechange };
 				target.volatiles.transform = { since: st.turn };
 				target.transformedInto = into.species;
 				target.species = into.species;
 			}
 			break;
 		}
+		case '-prepare': {
+			// Charging a two-turn move (Solar Beam, Meteor Beam, ...): locked into it next turn.
+			if (target && args[1]) target.volatiles.twoturnmove = { since: st.turn, move: toID(args[1]) };
+			break;
+		}
+		case '-anim': {
+			// ...unless it fires right away (sun, Power Herb).
+			if (target && args[1] && target.volatiles.twoturnmove?.move === toID(args[1])) delete target.volatiles.twoturnmove;
+			break;
+		}
+		case '-singleturn': {
+			// Helping Hand, Roost, Protect, Endure, Follow Me, ...: until the end of the turn.
+			if (target && args[1]) {
+				const id = toID(effectOf(args[1])?.name ?? args[1]);
+				const prev = target.volatiles[id];
+				target.volatiles[id] = { since: st.turn, singleTurn: true, count: (prev?.count ?? 0) + 1, source: this.mon(tags.of)?.ident };
+			}
+			this.attributeFrom(cmd, target, tags);
+			break;
+		}
+		case '-singlemove': {
+			// Glaive Rush, Destiny Bond, Grudge...: until the Pokémon's next move.
+			if (target && args[1]) target.volatiles[toID(effectOf(args[1])?.name ?? args[1])] = { since: st.turn, singleMove: true };
+			break;
+		}
 		case '-immune': case '-block': case '-fail': case '-miss': case '-crit': case '-supereffective':
-		case '-resisted': case '-notarget': case '-prepare': case '-hitcount': case '-singleturn':
-		case '-singlemove': case '-zbroken': case '-center': case '-combine': case '-waiting':
-		case '-mustrecharge': case '-anim': case '-hint': case '-message':
+		case '-resisted': case '-notarget': case '-hitcount':
+		case '-zbroken': case '-center': case '-combine': case '-waiting':
+		case '-mustrecharge': case '-hint': case '-message':
 			this.attributeFrom(cmd, target, tags);
 			break;
 		default:
