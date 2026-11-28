@@ -31,7 +31,8 @@
 		"replay-stats": "tsx scripts/replay-stats.ts",
 		"extract-positions": "tsx scripts/extract-positions.ts",
 		"check-labels": "tsx scripts/check-labels.ts",
-		"replay-bench": "tsx scripts/replay-bench.ts"
+		"replay-bench": "tsx scripts/replay-bench.ts",
+		"featurize": "tsx scripts/featurize.ts"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.0",

@@ -117,3 +117,35 @@ test('replay positions rebuild with the labelled choices legal', async () => {
 	expect(checked).toBeGreaterThan(3);
 	expect(legal).toBe(checked);
 }, 120_000);
+
+test('training examples encode the labelled choices against their own tokens', async () => {
+	const { gameExamples } = await import('../src/nn/examples.js');
+	const { Vocab, MON_INTS, SWITCH_BASE } = await import('../src/nn/features.js');
+	const vocab = new Vocab();
+	let checked = 0;
+	for (let seed = 1; seed <= 8; seed++) {
+		const b = randomBattle(seed, true); const rng = makeRng(seed);
+		while (!b.ended && b.turn < 30) for (const s of sidesNeedingChoice(b)) { const o = legalChoices(b, s); submit(b, s, o[Math.floor(rng() * o.length)]!); if (b.ended) break; }
+		const log = viewOfLog(b.log).join('\n');
+		const labels = labelLog(log);
+		for (const e of gameExamples(`sim-${seed}`, log, vocab)) {
+			const t = labels.turns.find(x => x.turn === e.turn && x.side === e.side)!;
+			expect(e.labels[6]).toBe(labels.winner === e.side ? 1 : -1);
+			for (const slot of [0, 1]) {
+				const l = t.slots[slot]; const a = e.labels[slot * 3]!;
+				if (a < 0 || !l) continue;
+				checked++;
+				const token = [...Array(6).keys()].find(i => e.features.ints[i * MON_INTS.length + 8] === 2 + slot)!;
+				if (a >= SWITCH_BASE) {
+					if (l.action !== 'switch') throw new Error(`switch encoded for ${JSON.stringify(l)}`);
+					const sp = vocab.species[e.features.ints[(a - SWITCH_BASE) * MON_INTS.length]!]!;
+					expect(sp.startsWith(toID(l.species).slice(0, 4))).toBe(true);
+				} else {
+					expect(l.action).toBe('move');
+					expect(vocab.moves[e.features.ints[token * MON_INTS.length + 3 + a]!]).toBe(l.action === 'move' ? l.move : '');
+				}
+			}
+		}
+	}
+	expect(checked).toBeGreaterThan(100);
+}, 120_000);

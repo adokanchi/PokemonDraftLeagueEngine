@@ -59,6 +59,7 @@ from your main Showdown account, so import them there once.
 | `npm run extract-positions` | Read each player's per-turn choices (move, target, Mega, switch) and the result from every saved replay into `data/positions/<format>.jsonl.gz` |
 | `npm run check-labels` | Check the choice reader against simulated battles where the real choices are known (should report 0 wrong) |
 | `npm run replay-bench` | How often the engine picks what the winning player picked, on held-out replays (with random and most-frequent-move baselines; `--no-usage` to compare priors) |
+| `npm run featurize` | Build the neural network training data from saved replays into `data/features/<format>/` (read it with `python python/dataset.py DIR`) |
 | `npm run server` | Local Showdown server on port 8000 (no passwords), for practice games |
 | `npm run practice -- --team their-team.txt` | The engine as a Showdown bot ("EngineBot") that accepts challenges on the local server; see above |
 | `npm run arena -- 20 [--vs greedy] [--jobs N]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams); `--jobs` games at a time on worker threads (default: all threads but one) |
