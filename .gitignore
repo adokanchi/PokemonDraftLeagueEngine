@@ -6,3 +6,4 @@ dist/
 .env
 bench-results/
 data/usage/
+data/replays/
