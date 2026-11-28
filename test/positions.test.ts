@@ -92,3 +92,28 @@ test('Ally Switch, Illusion, failed moves, locked moves and confusion self-hits'
 	expect(turn(3, 'p1')[1]).toEqual({ action: 'unknown', why: 'locked into a move' });
 	expect(turn(3, 'p1')[0]).toMatchObject({ action: 'move', move: 'makeitrain' });
 });
+
+test('replay positions rebuild with the labelled choices legal', async () => {
+	const { benchInput, legalSlotActions, agreement } = await import('../src/data/bench.js');
+	const { solveTurn } = await import('../src/engine/solver.js');
+	let checked = 0, legal = 0;
+	for (let seed = 1; seed <= 6; seed++) {
+		const b = randomBattle(seed, true); const rng = makeRng(seed);
+		while (!b.ended && b.turn < 30) for (const s of sidesNeedingChoice(b)) { const o = legalChoices(b, s); submit(b, s, o[Math.floor(rng() * o.length)]!); if (b.ended) break; }
+		const lines = viewOfLog(b.log);
+		const labels = labelLog(lines);
+		const t = labels.turns.find(x => x.turn === 2 && x.slots.some(l => l && l.action !== 'unknown'));
+		if (!t) continue;
+		const setup = benchInput(lines, t.turn, t.side, { samples: 1, keep: 4, seed });
+		if ('skip' in setup) continue;
+		const ref = solveTurn(setup.input).reference;
+		const acts = legalSlotActions(ref, t.side);
+		t.slots.forEach((l, i) => {
+			if (!l || l.action === 'unknown') return;
+			checked++;
+			if (acts[i]?.some(a => agreement(a, l).full)) legal++;
+		});
+	}
+	expect(checked).toBeGreaterThan(3);
+	expect(legal).toBe(checked);
+}, 120_000);

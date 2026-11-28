@@ -22,6 +22,15 @@ export interface TurnLabel {
 	side: SideId;
 	/** Slot a and b (null: no Pokémon there). */
 	slots: (SlotLabel | null)[];
+	/** Species in each slot when the choice was made (as shown at switch-in; Zoroark once revealed). */
+	species: (string | null)[];
+}
+
+/** Held-out games (about 1 in 20, by replay id): kept out of training, used to benchmark. */
+export function isHeldOut(id: string): boolean {
+	let h = 2166136261;
+	for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+	return (h >>> 0) % 20 === 0;
 }
 
 export interface GameLabels {
@@ -57,6 +66,9 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 	// Who is in each slot, as of the start of the current turn's actions.
 	const occupant: Record<SideId, (string | null)[]> = { p1: [null, null], p2: [null, null] };
 	/** The label or replacement that brought in whoever stands at each position, so Illusion can be corrected. */
+	/** side:name -> species, from switch-in details. */
+	const speciesOf: Record<string, string> = {};
+	const noteSpecies = (side: SideId, name: string, details: string | undefined) => { speciesOf[`${side}:${name}`] = (details ?? '').split(',')[0]!.trim(); };
 	const cameIn: Record<string, { species: string; name?: string } | undefined> = {};
 	let turn = 0;
 	let body: string[] = [];
@@ -111,6 +123,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 				const was = slotsNow[p.side][p.slot], o = at(p);
 				if (was && occupant[p.side][o] === was) occupant[p.side][o] = p.name;
 				slotsNow[p.side][p.slot] = p.name;
+				noteSpecies(p.side, p.name, args[1]);
 				const c = cameIn[`${p.side}${p.slot}`];
 				if (c) { c.species = (args[1] ?? '').split(',')[0]!.trim(); if (c.name !== undefined) c.name = p.name; }
 				continue;
@@ -132,6 +145,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 				if (!p) continue;
 				const key = keyOf(p), o = at(p);
 				const species = (args[1] ?? '').split(',')[0]!.trim();
+				noteSpecies(p.side, p.name, args[1]);
 				// Switches before anyone acts are chosen; later ones come from moves or items (U-turn, Eject Button).
 				if (cmd === 'switch' && !from && !actionsStarted && !decided.has(key) && labels[p.side][o] !== null) {
 					const label = { action: 'switch' as const, species, name: p.name };
@@ -200,7 +214,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 		});
 		// A turn that never ran (forfeit or timer loss right after |turn|) has no choices to read.
 		const ran = ls.some(l => /^\|(move|cant|switch|drag)\|/.test(l));
-		if (ran) for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side] });
+		if (ran) for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side], species: occupant[side].map(n => (n ? speciesOf[`${side}:${n}`] ?? null : null)) });
 		else out.unplayedTurn = t;
 		// Replacements after the turn's actions: switches after upkeep.
 		const up = ls.findIndex(l => l === '|upkeep');
@@ -222,7 +236,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 		if (cmd === 'win') { const w = Object.entries(out.players).find(([, n]) => toID(n) === toID(args[0] ?? '')); if (w) out.winner = w[0] as SideId; }
 		if (turn === 0) {
 			// Leads.
-			if (cmd === 'switch') { const p = pos(args[0]); if (p) occupant[p.side][p.slot] = p.name; }
+			if (cmd === 'switch') { const p = pos(args[0]); if (p) { occupant[p.side][p.slot] = p.name; noteSpecies(p.side, p.name, args[1]); } }
 			continue;
 		}
 		body.push(line);
