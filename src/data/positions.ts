@@ -56,6 +56,8 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 	const out: GameLabels = { players: { p1: '', p2: '' }, turns: [], replacements: [] };
 	// Who is in each slot, as of the start of the current turn's actions.
 	const occupant: Record<SideId, (string | null)[]> = { p1: [null, null], p2: [null, null] };
+	/** The label or replacement that brought in whoever stands at each position, so Illusion can be corrected. */
+	const cameIn: Record<string, { species: string; name?: string } | undefined> = {};
 	let turn = 0;
 	let body: string[] = [];
 	const flush = () => {
@@ -102,6 +104,18 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 			if (cmd === '-start' && /Encore/.test(args[1] ?? '')) { const p = pos(args[0]); if (p) encored.add(keyOf(p)); }
 			// Hurt itself in confusion: no cant line, just the damage.
 			if (cmd === '-damage' && from === '[from] confusion') { const p = pos(args[0]); if (p) settle(p, "couldn't move (confusion)"); }
+			// Illusion broke: the Pokémon here was Zoroark all along. Fix the name, and the switch that brought it in.
+			if (cmd === 'replace') {
+				const p = pos(args[0]);
+				if (!p) continue;
+				const was = slotsNow[p.side][p.slot], o = at(p);
+				if (was && occupant[p.side][o] === was) occupant[p.side][o] = p.name;
+				slotsNow[p.side][p.slot] = p.name;
+				const c = cameIn[`${p.side}${p.slot}`];
+				if (c) { c.species = (args[1] ?? '').split(',')[0]!.trim(); if (c.name !== undefined) c.name = p.name; }
+				continue;
+			}
+			if (line === '|upkeep') actionsStarted = true;
 			if (cmd === 'swap') {
 				const p = pos(args[0]);
 				const to = Number(args[1]);
@@ -109,6 +123,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 					const c = chosenAt[p.side], n = slotsNow[p.side];
 					[c[0], c[1]] = [c[1]!, c[0]!];
 					[n[0], n[1]] = [n[1]!, n[0]!];
+					const a = cameIn[`${p.side}0`]; cameIn[`${p.side}0`] = cameIn[`${p.side}1`]; cameIn[`${p.side}1`] = a;
 				}
 				continue;
 			}
@@ -119,9 +134,12 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 				const species = (args[1] ?? '').split(',')[0]!.trim();
 				// Switches before anyone acts are chosen; later ones come from moves or items (U-turn, Eject Button).
 				if (cmd === 'switch' && !from && !actionsStarted && !decided.has(key) && labels[p.side][o] !== null) {
-					labels[p.side][o] = { action: 'switch', species, name: p.name };
+					const label = { action: 'switch' as const, species, name: p.name };
+					labels[p.side][o] = label;
+					cameIn[`${p.side}${p.slot}`] = label;
 					decided.add(key);
 				} else {
+					cameIn[`${p.side}${p.slot}`] = undefined;
 					// Whoever it replaced left before acting (Eject Button, Roar, Red Card).
 					const gone = slotsNow[p.side][p.slot];
 					if (gone) settle({ side: p.side, slot: p.slot, name: gone }, 'left the field before acting');
@@ -171,7 +189,7 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 					const retargeted = tp?.side === foe && faintedFoeSlots[foe].size > 0;
 					if (tp && (retargeted || SHOWN_TARGET_UNRELIABLE.has(move.id)) && !redirected[foe] && !absorbed) { /* move known, target not */ }
 					else if (tp && !(tp.side === foe && redirected[foe]) && !absorbed) label.target = tp.side === p.side ? -(tp.slot + 1) : tp.slot + 1;
-					else { labels[p.side][o] = { action: 'unknown', why: tp ? 'target redirected' : 'target hidden' }; continue; }
+					// Redirected, failed or no target left: the move is known, the target isn't.
 				}
 				labels[p.side][o] = label;
 				continue;
@@ -190,7 +208,10 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 			const { cmd, args } = parts(line);
 			if (cmd !== 'switch') continue;
 			const p = pos(args[0]);
-			if (p) out.replacements.push({ turn: t, side: p.side, slot: p.slot, species: (args[1] ?? '').split(',')[0]!.trim() });
+			if (!p) continue;
+			const r = { turn: t, side: p.side, slot: p.slot, species: (args[1] ?? '').split(',')[0]!.trim() };
+			out.replacements.push(r);
+			cameIn[`${p.side}${p.slot}`] = r;
 		}
 		occupant.p1 = slotsNow.p1; occupant.p2 = slotsNow.p2;
 	};
