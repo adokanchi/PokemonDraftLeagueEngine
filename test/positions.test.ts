@@ -41,3 +41,38 @@ test('replay choice labels match what was submitted', () => {
 	expect(wrong).toBe(0);
 	expect(known / slots).toBeGreaterThan(0.8);
 });
+
+test('Ally Switch, locked moves and confusion self-hits in a real replay', () => {
+	const log = `|player|p1|A|
+|player|p2|B|
+|switch|p1a: end of the horizon|Lucario, L50, M|100/100
+|switch|p1b: anime swordsman|Gholdengo, L50|100/100
+|switch|p2a: Sneasler|Sneasler, L50, F|100/100
+|switch|p2b: Arcanine|Arcanine, L50, M|100/100
+|turn|1
+|
+|move|p1b: anime swordsman|Ally Switch|p1b: anime swordsman
+|swap|p1b: anime swordsman|0|[from] move: Ally Switch
+|move|p2a: Sneasler|Close Combat|p1a: anime swordsman
+|-immune|p1a: anime swordsman
+|move|p1b: end of the horizon|Aura Sphere|p2b: Arcanine
+|-damage|p2b: Arcanine|1/100
+|-activate|p2b: Arcanine|confusion
+|-damage|p2b: Arcanine|0 fnt|[from] confusion
+|faint|p2b: Arcanine
+|
+|upkeep
+|turn|2
+|
+|move|p1b: end of the horizon|Electro Shot|p2a: Sneasler|[from] lockedmove
+|move|p1a: anime swordsman|Make It Rain|p2a: Sneasler
+|
+|upkeep
+|win|A`;
+	const g = labelLog(log);
+	const turn = (t: number, side: string) => g.turns.find(x => x.turn === t && x.side === side)!.slots;
+	expect(turn(1, 'p1')).toEqual([{ action: 'move', move: 'aurasphere', target: 2 }, { action: 'move', move: 'allyswitch' }]);
+	expect(turn(1, 'p2')[1]).toEqual({ action: 'unknown', why: "couldn't move (confusion)" });
+	expect(turn(2, 'p1')[1]).toEqual({ action: 'unknown', why: 'locked into a move' });
+	expect(turn(2, 'p1')[0]).toMatchObject({ action: 'move', move: 'makeitrain' });
+});
