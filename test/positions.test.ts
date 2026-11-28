@@ -41,3 +41,54 @@ test('replay choice labels match what was submitted', () => {
 	expect(wrong).toBe(0);
 	expect(known / slots).toBeGreaterThan(0.8);
 });
+
+test('Ally Switch, Illusion, failed moves, locked moves and confusion self-hits', () => {
+	const log = `|player|p1|A|
+|player|p2|B|
+|switch|p1a: end of the horizon|Lucario, L50, M|100/100
+|switch|p1b: anime swordsman|Gholdengo, L50|100/100
+|switch|p2a: Sneasler|Sneasler, L50, F|100/100
+|switch|p2b: Arcanine|Arcanine, L50, M|100/100
+|turn|1
+|
+|switch|p2a: Mawile|Mawile, L50, F|100/100
+|move|p1a: end of the horizon|Protect|p1a: end of the horizon
+|move|p1b: anime swordsman|Protect|p1b: anime swordsman
+|move|p2b: Arcanine|Protect|p2b: Arcanine
+|
+|upkeep
+|turn|2
+|
+|move|p1b: anime swordsman|Ally Switch|p1b: anime swordsman
+|swap|p1b: anime swordsman|0|[from] move: Ally Switch
+|move|p2a: Mawile|Sucker Punch||[still]
+|-fail|p2a: Mawile
+|move|p1a: anime swordsman|Shadow Ball|p2a: Mawile
+|-damage|p2a: Mawile|0 fnt
+|replace|p2a: Zoroark|Zoroark-Hisui, L50, F
+|-end|p2a: Zoroark|Illusion
+|faint|p2a: Zoroark
+|move|p1b: end of the horizon|Aura Sphere|p2b: Arcanine
+|-damage|p2b: Arcanine|1/100
+|-activate|p2b: Arcanine|confusion
+|-damage|p2b: Arcanine|0 fnt|[from] confusion
+|faint|p2b: Arcanine
+|
+|upkeep
+|turn|3
+|
+|move|p1b: end of the horizon|Electro Shot|p2a: Sneasler|[from] lockedmove
+|move|p1a: anime swordsman|Make It Rain|p2a: Sneasler
+|
+|upkeep
+|win|A`;
+	const g = labelLog(log);
+	const turn = (t: number, side: string) => g.turns.find(x => x.turn === t && x.side === side)!.slots;
+	// The switch into "Mawile" was Zoroark (its Illusion broke on turn 2).
+	expect(turn(1, 'p2')[0]).toEqual({ action: 'switch', species: 'Zoroark-Hisui', name: 'Zoroark' });
+	// A foe fainted earlier in the turn, so Aura Sphere may have been retargeted: move known, target not.
+	expect(turn(2, 'p1')).toEqual([{ action: 'move', move: 'aurasphere' }, { action: 'move', move: 'allyswitch' }]);
+	expect(turn(2, 'p2')).toEqual([{ action: 'move', move: 'suckerpunch' }, { action: 'unknown', why: "couldn't move (confusion)" }]);
+	expect(turn(3, 'p1')[1]).toEqual({ action: 'unknown', why: 'locked into a move' });
+	expect(turn(3, 'p1')[0]).toMatchObject({ action: 'move', move: 'makeitrain' });
+});

@@ -15,7 +15,7 @@ import type { SideId } from '../state/types.js';
 export type SlotLabel =
 	| { action: 'move'; move: string; /** Showdown target: 1/2 foe slot a/b, -1/-2 ally slot a/b; absent if the move picks none. */ target?: number; mega?: boolean }
 	| { action: 'switch'; /** Species (team forme) brought in. */ species: string; name: string }
-	| { action: 'unknown'; why: string };
+	| { action: 'unknown'; /** e.g. couldn't move, fainted before acting, locked into a move (no choice made), target hidden. */ why: string };
 
 export interface TurnLabel {
 	turn: number;
@@ -28,11 +28,15 @@ export interface GameLabels {
 	winner?: SideId;
 	players: Record<SideId, string>;
 	turns: TurnLabel[];
+	/** The last turn if it never ran (the game ended by forfeit or timer first). */
+	unplayedTurn?: number;
 	/** Replacements after faints (end of turn): who came in. */
 	replacements: { turn: number; side: SideId; slot: number; species: string }[];
 }
 
 const TARGETED = new Set(['normal', 'any', 'adjacentFoe', 'adjacentAlly', 'adjacentAllyOrSelf']);
+/** The shown target can differ from the chosen one (Dragon Darts retargets; Expanding Force spreads in Psychic Terrain). */
+const SHOWN_TARGET_UNRELIABLE = new Set(['dragondarts', 'expandingforce']);
 const REDIRECT = /Follow Me|Rage Powder|Spotlight|Ally Switch/;
 
 function parts(line: string) {
@@ -52,6 +56,8 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 	const out: GameLabels = { players: { p1: '', p2: '' }, turns: [], replacements: [] };
 	// Who is in each slot, as of the start of the current turn's actions.
 	const occupant: Record<SideId, (string | null)[]> = { p1: [null, null], p2: [null, null] };
+	/** The label or replacement that brought in whoever stands at each position, so Illusion can be corrected. */
+	const cameIn: Record<string, { species: string; name?: string } | undefined> = {};
 	let turn = 0;
 	let body: string[] = [];
 	const flush = () => {
@@ -63,6 +69,8 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 			p1: occupant.p1.map(o => (o ? { action: 'unknown', why: 'no action shown' } : null)),
 			p2: occupant.p2.map(o => (o ? { action: 'unknown', why: 'no action shown' } : null)),
 		};
+		// Keys are side + the slot a Pokémon stood in when the turn's choices were made: Ally Switch
+		// moves it, and the log then names it by its new slot.
 		const decided = new Set<string>();
 		const mega = new Set<string>();
 		const redirected: Record<SideId, boolean> = { p1: false, p2: false };
@@ -72,71 +80,138 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 		const encored = new Set<string>();
 		const faintedFoeSlots: Record<SideId, Set<number>> = { p1: new Set(), p2: new Set() };
 		const slotsNow: Record<SideId, (string | null)[]> = { p1: [...occupant.p1], p2: [...occupant.p2] };
-		for (const line of ls) {
+		/** Current position -> slot at choice time. */
+		const chosenAt: Record<SideId, number[]> = { p1: [0, 1], p2: [0, 1] };
+		const at = (p: { side: SideId; slot: number }) => chosenAt[p.side][p.slot]!;
+		const keyOf = (p: { side: SideId; slot: number }) => `${p.side}${at(p)}`;
+		/** Marks a slot that hasn't acted yet as unknown for `why` (it's not going to act). */
+		const settle = (p: { side: SideId; slot: number; name: string }, why: string) => {
+			const key = keyOf(p), o = at(p);
+			if (decided.has(key) || labels[p.side][o]?.action !== 'unknown' || occupant[p.side][o] !== p.name) return;
+			labels[p.side][o] = { action: 'unknown', why };
+			decided.add(key);
+		};
+		for (let i = 0; i < ls.length; i++) {
+			const line = ls[i]!;
 			const { cmd, args, tags } = parts(line);
 			const from = tags.find(t => t.startsWith('[from]'));
 			if (cmd === '-mega' || (cmd === 'detailschange' && /-Mega/.test(args[1] ?? ''))) {
 				const p = pos(args[0]);
-				if (p) mega.add(`${p.side}${p.slot}`);
+				if (p) mega.add(keyOf(p));
 			}
 			if (cmd === '-singleturn' && REDIRECT.test(args[1] ?? '')) { const p = pos(args[0]); if (p) redirected[p.side] = true; }
-			if (cmd === '-singleturn' && /Instruct/.test(args[1] ?? '')) { const p = pos(args[0]); if (p) instructed.add(`${p.side}${p.slot}`); }
-			if (cmd === '-start' && /Encore/.test(args[1] ?? '')) { const p = pos(args[0]); if (p) encored.add(`${p.side}${p.slot}`); }
+			if (cmd === '-singleturn' && /Instruct/.test(args[1] ?? '')) { const p = pos(args[0]); if (p) instructed.add(keyOf(p)); }
+			if (cmd === '-start' && /Encore/.test(args[1] ?? '')) { const p = pos(args[0]); if (p) encored.add(keyOf(p)); }
+			// Hurt itself in confusion: no cant line, just the damage.
+			if (cmd === '-damage' && from === '[from] confusion') { const p = pos(args[0]); if (p) settle(p, "couldn't move (confusion)"); }
+			// Illusion broke: the Pokémon here was Zoroark all along. Fix the name, and the switch that brought it in.
+			if (cmd === 'replace') {
+				const p = pos(args[0]);
+				if (!p) continue;
+				const was = slotsNow[p.side][p.slot], o = at(p);
+				if (was && occupant[p.side][o] === was) occupant[p.side][o] = p.name;
+				slotsNow[p.side][p.slot] = p.name;
+				const c = cameIn[`${p.side}${p.slot}`];
+				if (c) { c.species = (args[1] ?? '').split(',')[0]!.trim(); if (c.name !== undefined) c.name = p.name; }
+				continue;
+			}
+			if (line === '|upkeep') actionsStarted = true;
+			if (cmd === 'swap') {
+				const p = pos(args[0]);
+				const to = Number(args[1]);
+				if (p && (to === 0 || to === 1) && to !== p.slot) {
+					const c = chosenAt[p.side], n = slotsNow[p.side];
+					[c[0], c[1]] = [c[1]!, c[0]!];
+					[n[0], n[1]] = [n[1]!, n[0]!];
+					const a = cameIn[`${p.side}0`]; cameIn[`${p.side}0`] = cameIn[`${p.side}1`]; cameIn[`${p.side}1`] = a;
+				}
+				continue;
+			}
 			if (cmd === 'switch' || cmd === 'drag') {
 				const p = pos(args[0]);
 				if (!p) continue;
-				const key = `${p.side}${p.slot}`;
+				const key = keyOf(p), o = at(p);
 				const species = (args[1] ?? '').split(',')[0]!.trim();
 				// Switches before anyone acts are chosen; later ones come from moves or items (U-turn, Eject Button).
-				if (cmd === 'switch' && !from && !actionsStarted && !decided.has(key) && labels[p.side][p.slot] !== null) {
-					labels[p.side][p.slot] = { action: 'switch', species, name: p.name };
+				if (cmd === 'switch' && !from && !actionsStarted && !decided.has(key) && labels[p.side][o] !== null) {
+					const label = { action: 'switch' as const, species, name: p.name };
+					labels[p.side][o] = label;
+					cameIn[`${p.side}${p.slot}`] = label;
 					decided.add(key);
+				} else {
+					cameIn[`${p.side}${p.slot}`] = undefined;
+					// Whoever it replaced left before acting (Eject Button, Roar, Red Card).
+					const gone = slotsNow[p.side][p.slot];
+					if (gone) settle({ side: p.side, slot: p.slot, name: gone }, 'left the field before acting');
 				}
 				slotsNow[p.side][p.slot] = p.name;
 				continue;
 			}
 			if (cmd === 'faint') {
 				const p = pos(args[0]);
-				if (p) { slotsNow[p.side][p.slot] = null; faintedFoeSlots[p.side].add(p.slot); }
+				if (p) {
+					settle(p, 'fainted before acting');
+					slotsNow[p.side][p.slot] = null; faintedFoeSlots[p.side].add(p.slot);
+				}
 				continue;
 			}
 			if (cmd === 'move' || cmd === 'cant') {
 				actionsStarted = true;
 				const p = pos(args[0]);
 				if (!p) continue;
-				const key = `${p.side}${p.slot}`;
+				const key = keyOf(p), o = at(p);
 				if (cmd === 'move' && instructed.has(key)) { instructed.delete(key); continue; }
-				if (decided.has(key) || from) continue;
+				if (decided.has(key)) continue;
+				// Locked in (second turn of a charge move, Outrage, recharge): nothing was chosen.
+				if (from === '[from] lockedmove') { settle(p, 'locked into a move'); continue; }
+				if (from) continue;
 				decided.add(key);
 				// Encored before it moved this turn: what it chose was overridden.
-				if (encored.has(key)) { labels[p.side][p.slot] = { action: 'unknown', why: 'Encored this turn' }; continue; }
-				if (cmd === 'cant') { labels[p.side][p.slot] = { action: 'unknown', why: `couldn't move (${args[1]})` }; continue; }
+				if (encored.has(key)) { labels[p.side][o] = { action: 'unknown', why: 'Encored this turn' }; continue; }
+				if (cmd === 'cant') { labels[p.side][o] = { action: 'unknown', why: args[1] === 'recharge' ? 'locked into a move' : `couldn't move (${args[1]})` }; continue; }
 				const move = format.dex.moves.get(args[1] ?? '');
+				if (move.id === 'struggle') { labels[p.side][o] = { action: 'unknown', why: 'locked into a move' }; continue; }
 				const label: SlotLabel = { action: 'move', move: move.id || toID(args[1] ?? '') };
 				if (mega.has(key)) label.mega = true;
 				if (TARGETED.has(move.target)) {
-					const tp = pos(args[2]);
+					let tp = pos(args[2]);
+					// Charge moves that fire at once (Electro Shot in rain, Power Herb) name the target on -anim.
+					if (!tp && tags.includes('[still]')) {
+						for (let j = i + 1; j < ls.length && j < i + 4; j++) {
+							const q = parts(ls[j]!);
+							if (q.cmd === '-anim' && q.args[0] === args[0]) { tp = pos(q.args[2]); break; }
+						}
+					}
 					const foe = p.side === 'p1' ? 'p2' : 'p1';
 					// The shown target isn't the chosen one if the opponent redirected, or Lightning Rod-style abilities did.
 					const absorbed = ls.some(l => /-activate\|.*\|ability: (Lightning Rod|Storm Drain)/.test(l));
 					// A foe fainted earlier this turn: a move aimed at it was retargeted, so the shown target may not be the chosen one.
 					const retargeted = tp?.side === foe && faintedFoeSlots[foe].size > 0;
-					if (tp && retargeted && !redirected[foe] && !absorbed) { /* move known, target not */ }
+					if (tp && (retargeted || SHOWN_TARGET_UNRELIABLE.has(move.id)) && !redirected[foe] && !absorbed) { /* move known, target not */ }
 					else if (tp && !(tp.side === foe && redirected[foe]) && !absorbed) label.target = tp.side === p.side ? -(tp.slot + 1) : tp.slot + 1;
-					else if (!tp || redirected[foe] || absorbed) { labels[p.side][p.slot] = { action: 'unknown', why: 'target hidden or redirected' }; continue; }
+					// Redirected, failed or no target left: the move is known, the target isn't.
 				}
-				labels[p.side][p.slot] = label;
+				labels[p.side][o] = label;
 				continue;
 			}
 		}
-		for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side] });
+		if (ls.some(l => l.startsWith('|win|') || l === '|tie')) for (const side of ['p1', 'p2'] as const) labels[side].forEach((l, i) => {
+			if (l?.action === 'unknown' && l.why === 'no action shown') labels[side][i] = { action: 'unknown', why: 'game ended first' };
+		});
+		// A turn that never ran (forfeit or timer loss right after |turn|) has no choices to read.
+		const ran = ls.some(l => /^\|(move|cant|switch|drag)\|/.test(l));
+		if (ran) for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side] });
+		else out.unplayedTurn = t;
 		// Replacements after the turn's actions: switches after upkeep.
 		const up = ls.findIndex(l => l === '|upkeep');
 		for (const line of up >= 0 ? ls.slice(up) : []) {
 			const { cmd, args } = parts(line);
 			if (cmd !== 'switch') continue;
 			const p = pos(args[0]);
-			if (p) out.replacements.push({ turn: t, side: p.side, slot: p.slot, species: (args[1] ?? '').split(',')[0]!.trim() });
+			if (!p) continue;
+			const r = { turn: t, side: p.side, slot: p.slot, species: (args[1] ?? '').split(',')[0]!.trim() };
+			out.replacements.push(r);
+			cameIn[`${p.side}${p.slot}`] = r;
 		}
 		occupant.p1 = slotsNow.p1; occupant.p2 = slotsNow.p2;
 	};
