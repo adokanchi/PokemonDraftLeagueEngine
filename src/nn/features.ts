@@ -45,6 +45,35 @@ export class Vocab {
 	}
 
 	toJSON() { return { species: this.species, moves: this.moves, items: this.items, abilities: this.abilities }; }
+
+	/**
+	 * What each species and move is, for models that describe them by their properties rather than
+	 * by id alone (so a new regulation's Pokémon aren't strangers). Rows follow the vocab order.
+	 */
+	properties(format: ResolvedFormat = resolveFormat()) {
+		const dex = format.dex;
+		const types = dex.types.all().filter(t => t.exists).map(t => t.id).sort();
+		const typeId = (t: string | undefined) => (t ? types.indexOf(toID(t)) + 1 : 0);
+		const targets = ['normal', 'any', 'adjacentFoe', 'adjacentAlly', 'adjacentAllyOrSelf', 'self', 'allAdjacentFoes', 'allAdjacent', 'allySide', 'foeSide', 'all', 'allies', 'randomNormal', 'scripted', 'allyTeam'];
+		const flags = ['contact', 'protect', 'sound', 'punch', 'bite', 'bullet', 'pulse', 'slicing', 'wind', 'powder', 'heal', 'recharge', 'charge'];
+		const species = this.species.map(id => {
+			const sp = id && id !== '?' ? dex.species.get(id) : undefined;
+			if (!sp?.exists) return null;
+			const b = sp.baseStats;
+			return [typeId(sp.types[0]), typeId(sp.types[1]), b.hp, b.atk, b.def, b.spa, b.spd, b.spe, sp.weightkg, sp.isMega ? 1 : 0];
+		});
+		const moves = this.moves.map(id => {
+			const m = id && id !== '?' ? dex.moves.get(id) : undefined;
+			if (!m?.exists) return null;
+			return [typeId(m.type), ['Physical', 'Special', 'Status'].indexOf(m.category), m.basePower, m.accuracy === true ? 101 : m.accuracy, m.priority,
+				targets.indexOf(m.target), m.pp, ...flags.map(f => (m.flags as Record<string, number>)[f] ? 1 : 0)];
+		});
+		return {
+			types,
+			species: { columns: ['type1', 'type2', 'hp', 'atk', 'def', 'spa', 'spd', 'spe', 'weightkg', 'mega'], rows: species },
+			moves: { columns: ['type', 'category', 'power', 'accuracy', 'priority', 'target', 'pp', ...flags], rows: moves, targets },
+		};
+	}
 }
 
 export const STATUSES = ['', 'brn', 'par', 'slp', 'frz', 'psn', 'tox'] as const;

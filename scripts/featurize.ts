@@ -8,6 +8,7 @@
  * Output in data/features/<format>/:
  *   layout.json   field names and label codes (the contract with the Python side)
  *   vocab.json    id -> name for species, moves, items, abilities
+ *   properties.json  types, base stats, move power/category/target/flags... per vocab row
  *   games.txt     replay id per game index
  *   per shard k:  ints-k.i16 (rows × 12 × 9), floats-k.i8 (rows × (12 × mon floats + global), value/127),
  *                 labels-k.i8 (rows × 7), meta-k.i32 (rows × 5: game, turn, side, rating, held out)
@@ -40,6 +41,7 @@ if (!shardArg) {
 	const vocab = new Vocab();
 	writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ ...layout(vocab), format, shards: jobs }, null, 1));
 	writeFileSync(join(outDir, 'vocab.json'), JSON.stringify(vocab));
+	writeFileSync(join(outDir, 'properties.json'), JSON.stringify(vocab.properties()));
 	writeFileSync(join(outDir, 'games.txt'), ids.join('\n') + '\n');
 	console.log(`${format}: ${ids.length} replays, ${jobs} processes → ${outDir}`);
 	const started = Date.now();

@@ -137,7 +137,7 @@ test('training examples encode the labelled choices against their own tokens', a
 				checked++;
 				const token = [...Array(6).keys()].find(i => e.features.ints[i * MON_INTS.length + 8] === 2 + slot)!;
 				if (a >= SWITCH_BASE) {
-					expect(l.action).toBe('switch');
+					if (l.action !== 'switch') throw new Error(`switch encoded for ${JSON.stringify(l)}`);
 					const sp = vocab.species[e.features.ints[(a - SWITCH_BASE) * MON_INTS.length]!]!;
 					expect(sp.startsWith(toID(l.species).slice(0, 4))).toBe(true);
 				} else {
