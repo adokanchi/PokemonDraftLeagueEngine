@@ -56,6 +56,8 @@ from your main Showdown account, so import them there once.
 | `npm run preview -- --team my-team.txt --theirs "A, B, C, D, E, F"` | Team preview advice: which four to bring and who leads, a one-on-one matchup table, and what they're likely to bring. `--log game1.html --as p1` (repeatable) takes their six and what earlier games revealed from logs; `--their-roster` marks their Megas |
 | `npm run fetch-replays [-- --probe \| --max N \| --min-rating R]` | Download public Showdown replays of M-C (singles games and Bo3 ladder) into `data/replays/`, resumable; `--probe` checks what the replay site supports first |
 | `npm run replay-stats` | Parse every saved replay and report counts, ratings, parse problems and what each species was seen running |
+| `npm run extract-positions` | Read each player's per-turn choices (move, target, Mega, switch) and the result from every saved replay into `data/positions/<format>.jsonl.gz` |
+| `npm run check-labels` | Check the choice reader against simulated battles where the real choices are known (should report 0 wrong) |
 | `npm run server` | Local Showdown server on port 8000 (no passwords), for practice games |
 | `npm run practice -- --team their-team.txt` | The engine as a Showdown bot ("EngineBot") that accepts challenges on the local server; see above |
 | `npm run arena -- 20 [--vs greedy] [--jobs N]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams); `--jobs` games at a time on worker threads (default: all threads but one) |
