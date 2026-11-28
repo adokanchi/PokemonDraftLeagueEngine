@@ -2,7 +2,7 @@
  * Builds the neural network's training data from saved replays: every turn from each side's
  * point of view (src/nn/examples.ts), written as flat binary arrays for numpy/PyTorch.
  *
- *   npm run featurize                      # all replays, one process per core
+ *   npm run featurize                      # all replays, as many processes as cores and free memory allow
  *   npm run featurize -- --jobs 4 --max 2000 --dir data/replays --out data/features
  *
  * Output in data/features/<format>/:
@@ -15,7 +15,7 @@
  * Read with python/dataset.py.
  */
 import { fork } from 'node:child_process';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, freemem } from 'node:os';
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,18 +36,34 @@ const ids = store.ids(format).sort().slice(0, opt('max') ? Number(opt('max')) : 
 const shardArg = opt('shard');
 
 if (!shardArg) {
-	const jobs = Math.max(1, Number(opt('jobs') ?? Math.max(1, availableParallelism() - 1)));
+	// Each process holds its own copy of Showdown's data and the usage stats (~0.6 GB), so free
+	// memory, not cores, is usually the limit on a laptop. Too many and it all ends up in swap.
+	const PER_PROCESS = 0.6e9;
+	const byMemory = Math.floor((freemem() - 1e9) / PER_PROCESS);
+	const jobs = Math.max(1, Number(opt('jobs') ?? Math.min(availableParallelism() - 1, byMemory)));
 	mkdirSync(outDir, { recursive: true });
 	const vocab = new Vocab();
 	writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ ...layout(vocab), format, shards: jobs }, null, 1));
 	writeFileSync(join(outDir, 'vocab.json'), JSON.stringify(vocab));
 	writeFileSync(join(outDir, 'properties.json'), JSON.stringify(vocab.properties()));
 	writeFileSync(join(outDir, 'games.txt'), ids.join('\n') + '\n');
-	console.log(`${format}: ${ids.length} replays, ${jobs} processes → ${outDir}`);
+	console.log(`${format}: ${ids.length} replays, ${jobs} processes (${(freemem() / 1e9).toFixed(1)} GB free; set --jobs to change) → ${outDir}`);
 	const started = Date.now();
 	const script = fileURLToPath(import.meta.url);
+	const progress = new Array<number>(jobs).fill(0);
+	let lastPrint = Date.now();
+	const report = () => {
+		const done = progress.reduce((a, b) => a + b, 0);
+		const s = (Date.now() - started) / 1000;
+		const eta = done ? (s / done) * (ids.length - done) : 0;
+		console.log(`  ${done}/${ids.length} games (${(100 * done / ids.length).toFixed(0)}%), ${(done / s).toFixed(0)} games/s, about ${Math.ceil(eta / 60)} min left`);
+	};
 	await Promise.all(Array.from({ length: jobs }, (_, k) => new Promise<void>((res, rej) => {
 		const child = fork(script, [...args, '--shard', `${k}/${jobs}`], { execArgv: ['--import', 'tsx'] });
+		child.on('message', (m: { done: number }) => {
+			progress[k] = m.done;
+			if (Date.now() - lastPrint > 15_000) { lastPrint = Date.now(); report(); }
+		});
 		child.on('exit', code => (code === 0 ? res() : rej(new Error(`shard ${k} exited with ${code}`))));
 	})));
 	let rows = 0, games = 0, skippedSides = 0, failed = 0, held = 0;
@@ -73,8 +89,10 @@ const files = {
 	meta: openSync(join(outDir, `meta-${k}.i32`), 'w'),
 };
 const stats = { rows: 0, games: 0, skippedSides: 0, failed: 0, heldOutRows: 0, actionsKnown: 0, actionSlots: 0 };
+let processed = 0;
 for (let g = k; g < ids.length; g += n) {
 	const id = ids[g]!;
+	if (++processed % 50 === 0) process.send?.({ done: processed });
 	let ex;
 	try {
 		ex = gameExamples(id, store.load(format, id).log, vocab, { prior });
