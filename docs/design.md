@@ -192,6 +192,13 @@ Active only when a Zoroark is in their team preview. For each opposing Pokémon 
 5. Report: best sheet, strength score, deltas for variations, robustness report, prep sheet.
 - Budget: full 210×210 deep evaluation is out of reach; double oracle over tens of pairings ≈ an overnight run.
 
+### 5.8 Learning from replays (policy and value network)
+- Data: public Showdown replays of the format (`fetch-replays`), labelled per turn with what each player chose (`extract-positions`; checked against simulator truth, 0 wrong) and who won.
+- Benchmark: `replay-bench` rebuilds held-out positions (1 in 20 games, by replay id) from the winner's view and measures how often the engine picks the winner's action. M-C, 180 choices: engine 47% (39% with uniform priors), species' most frequent move 33%, random 25%.
+- Features (`featurize`, `src/nn/features.ts`): 12 Pokémon tokens (own six, then the opponent's six, in preview order) with ids for species, item, ability, moves, status and position, plus HP, boosts, volatiles and revealed flags; global field features. The opponent's tokens hold only what's been revealed; own tokens hold full sets (hindsight guesses in replays, true sets in play), with move order shuffled per game.
+- Labels: per active slot, move index in the token's moves with target and Mega, or switch to team index; game result for the value head. Own-Zoroark sides are skipped for now.
+- Training (desktop): policy head imitates winners (and optionally all players weighted by rating); value head predicts the result. Then the network replaces the hand-written evaluator in the search, and self-play improves it.
+
 ## 6. Build order
 
 - **P0 Foundations — done except data ingest:** repo, pinned Showdown + in-process sim harness, legal-choice enumeration, benchmark script, draft validator, battle-state schema + Showdown log parser + Bo3 knowledge. Data ingest (usage stats, replays) moved to P3/P4, where it's first needed.

@@ -9,6 +9,7 @@
  *
  * Options: --format F --dir REPLAYS --positions FILE --samples N --keep N --side winner|loser
  *          --seed N --out FILE (per-position results as JSON)
+ *          --misses N  print up to N choices that weren't legal in the rebuilt position
  *
  * Reported, per Pokémon that had a readable choice:
  *   action  same move (or "switch" when they switched)      full  also same target / same Pokémon
@@ -90,6 +91,8 @@ const add = (k: string, s: Score) => { const t = (tally[k] ??= { action: 0, full
 let slotsScored = 0, legalAction = 0, legalFull = 0, skipped = 0, failed = 0, done = 0;
 const skips: Record<string, number> = {};
 const results: unknown[] = [];
+const missLimit = Number(opt('misses') ?? 0);
+const misses: string[] = [];
 const pool = threads > 1 ? await SearchPool.start(threads) : undefined;
 const started = Date.now();
 try {
@@ -119,6 +122,10 @@ try {
 			const opts: SlotAction[] = legal[i]!;
 			const ag = opts.map(a => agreement(a, l));
 			if (ag.some(x => x.action)) legalAction++;
+			else if (misses.length < missLimit) {
+				const mon = ref.sides[c.side === 'p1' ? 0 : 1]!.active[i];
+				misses.push(`${c.id} turn ${c.turn} ${c.side}${'ab'[i]} ${mon?.species.name ?? '?'}: chose ${JSON.stringify(l)}\n    rebuilt moves: ${mon?.moveSlots.map(m => `${m.id}${m.disabled ? ' (disabled)' : ''}`).join(', ')}; team: ${ref.sides[c.side === 'p1' ? 0 : 1]!.pokemon.map(p => `${p.species.name}${p.fainted ? ' (fainted)' : ''}`).join(', ')}\n    legal: ${opts.map(a => a.key).join(' ')}`);
+			}
 			if (ag.some(x => x.full)) legalFull++;
 			const t = agreement(topActs[i] ?? { key: '', kind: 'other' }, l);
 			add('engine top', { action: +t.action, full: +t.full });
@@ -152,6 +159,7 @@ for (const k of ['engine top', 'engine mix', 'frequent', 'random']) {
 	if (!s) continue;
 	console.log(`${k.padEnd(12)} ${`${(100 * s.action / slotsScored).toFixed(1)}%`.padStart(8)} ${`${(100 * s.full / slotsScored).toFixed(1)}%`.padStart(8)}`);
 }
+if (misses.length) console.log(`\nNot legal in the rebuilt position:\n${misses.join('\n')}`);
 const out = opt('out');
 if (out) { writeFileSync(out, JSON.stringify({ format, prior: prior.source, samples, keep, tally, slotsScored, results }, null, 1)); console.log(`\nper-position results: ${out}`); }
 process.exit(0);
