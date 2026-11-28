@@ -86,7 +86,8 @@ test('Ally Switch, Illusion, failed moves, locked moves and confusion self-hits'
 	const turn = (t: number, side: string) => g.turns.find(x => x.turn === t && x.side === side)!.slots;
 	// The switch into "Mawile" was Zoroark (its Illusion broke on turn 2).
 	expect(turn(1, 'p2')[0]).toEqual({ action: 'switch', species: 'Zoroark-Hisui', name: 'Zoroark' });
-	expect(turn(2, 'p1')).toEqual([{ action: 'move', move: 'aurasphere', target: 2 }, { action: 'move', move: 'allyswitch' }]);
+	// A foe fainted earlier in the turn, so Aura Sphere may have been retargeted: move known, target not.
+	expect(turn(2, 'p1')).toEqual([{ action: 'move', move: 'aurasphere' }, { action: 'move', move: 'allyswitch' }]);
 	expect(turn(2, 'p2')).toEqual([{ action: 'move', move: 'suckerpunch' }, { action: 'unknown', why: "couldn't move (confusion)" }]);
 	expect(turn(3, 'p1')[1]).toEqual({ action: 'unknown', why: 'locked into a move' });
 	expect(turn(3, 'p1')[0]).toMatchObject({ action: 'move', move: 'makeitrain' });
