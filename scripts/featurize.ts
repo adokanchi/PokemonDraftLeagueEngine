@@ -36,9 +36,9 @@ const ids = store.ids(format).sort().slice(0, opt('max') ? Number(opt('max')) : 
 const shardArg = opt('shard');
 
 if (!shardArg) {
-	// Each process holds its own copy of Showdown's data and the usage stats (~0.6 GB), so free
+	// Each process holds its own copy of Showdown's data and the usage stats (up to ~1 GB), so free
 	// memory, not cores, is usually the limit on a laptop. Too many and it all ends up in swap.
-	const PER_PROCESS = 0.6e9;
+	const PER_PROCESS = 1e9;
 	const byMemory = Math.floor((freemem() - 1e9) / PER_PROCESS);
 	const jobs = Math.max(1, Number(opt('jobs') ?? Math.min(availableParallelism() - 1, byMemory)));
 	mkdirSync(outDir, { recursive: true });

@@ -123,6 +123,17 @@ export class UsagePrior implements SetPrior {
 	readonly hasUsage = true;
 	private data: Record<string, ChaosMon>;
 	private byId = new Map<string, ChaosMon>();
+	/**
+	 * Per-species results, computed once: the usage file holds thousands of spreads per species,
+	 * and the set model asks for them for every candidate it builds. Callers treat these as read-only.
+	 */
+	private cache = new Map<string, unknown>();
+	private memo<T>(key: string, f: () => T): T {
+		if (this.cache.has(key)) return this.cache.get(key) as T;
+		const v = f();
+		this.cache.set(key, v);
+		return v;
+	}
 
 	constructor(chaosJson: { info?: Record<string, unknown>; data: Record<string, ChaosMon> }, readonly base: UniformPrior,
 		private floor = 0.03, sourceName = 'usage stats') {
@@ -153,15 +164,21 @@ export class UsagePrior implements SetPrior {
 
 	canLearn(species: string, move: string) { return this.base.canLearn(species, move); }
 
-	abilityProbs(species: string) { return this.blend(this.mon(species)?.Abilities, this.base.abilityProbs(species)); }
+	abilityProbs(species: string) { return this.memo(`a:${toID(species)}`, () => this.blend(this.mon(species)?.Abilities, this.base.abilityProbs(species))); }
 
-	itemProbs(species: string) {
+	itemProbs(species: string) { return this.memo(`i:${toID(species)}`, () => this.itemProbsUncached(species)); }
+
+	private itemProbsUncached(species: string) {
 		const uniform = new Map(this.base.itemProbs(species));
 		uniform.set('', 1 / (uniform.size + 1));
 		return this.blend(this.mon(species)?.Items, uniform);
 	}
 
 	moveInclusion(species: string, move: string): number {
+		return this.memo(`m:${toID(species)}:${toID(move)}`, () => this.moveInclusionUncached(species, move));
+	}
+
+	private moveInclusionUncached(species: string, move: string): number {
 		const uni = this.base.moveInclusion(species, move);
 		if (!uni) return 0;
 		const mon = this.mon(species);
@@ -172,7 +189,9 @@ export class UsagePrior implements SetPrior {
 		return Math.min(1, (1 - this.floor) * (w / total) + this.floor * uni);
 	}
 
-	fullSpreads(species: string): FullSpread[] {
+	fullSpreads(species: string): FullSpread[] { return this.memo(`f:${toID(species)}`, () => this.fullSpreadsUncached(species)); }
+
+	private fullSpreadsUncached(species: string): FullSpread[] {
 		const spreads = this.mon(species)?.Spreads;
 		if (!spreads) return [];
 		const out: FullSpread[] = [];
@@ -190,7 +209,9 @@ export class UsagePrior implements SetPrior {
 		return out.sort((a, b) => b.p - a.p);
 	}
 
-	speedSpreads(species: string): SpreadEntry[] {
+	speedSpreads(species: string): SpreadEntry[] { return this.memo(`s:${toID(species)}`, () => this.speedSpreadsUncached(species)); }
+
+	private speedSpreadsUncached(species: string): SpreadEntry[] {
 		const spreads = this.mon(species)?.Spreads;
 		if (!spreads) return this.base.speedSpreads(species);
 		const agg = new Map<string, SpreadEntry>();
