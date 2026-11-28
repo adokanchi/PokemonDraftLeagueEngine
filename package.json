@@ -25,7 +25,8 @@
     "check-reconstruct": "tsx scripts/check-reconstruct.ts",
     "check-sets": "tsx scripts/check-sets.ts",
     "practice": "tsx scripts/practice.ts",
-    "server": "node vendor/pokemon-showdown/pokemon-showdown start --no-security 8000"
+    "server": "node vendor/pokemon-showdown/pokemon-showdown start --no-security 8000",
+    "preview": "tsx scripts/preview.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

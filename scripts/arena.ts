@@ -5,6 +5,10 @@
  *   npm run arena -- 20 --samples 3 --keep 8
  *   npm run arena -- 20 --vs greedy     # against a one-turn-greedy bot that can see your sets (cheats)
  *   npm run arena -- 40 --jobs 8        # play 8 games at a time on worker threads (default: all threads but one)
+ *   npm run arena -- 40 --vs self --vs-preview random   # the solver against itself with random team preview
+ *   --preview random|solver             # the solver bot's own team preview (default solver)
+ *   --replacements search|healthiest    # after a faint: search each replacement, or the healthiest (default)
+ *   --vs-replacements search|healthiest # the same for the opponent with --vs self
  */
 import { Worker } from 'node:worker_threads';
 import { defaultThreads } from '../src/engine/pool.js';
@@ -14,6 +18,11 @@ const args = process.argv.slice(2);
 const opt = (name: string, def: number) => { const i = args.indexOf(`--${name}`); return i >= 0 ? Number(args[i + 1]) : def; };
 const games = Number(args.find((a, i) => /^\d+$/.test(a) && !args[i - 1]?.startsWith('--')) ?? 10);
 const vs = (args.includes('--vs') ? args[args.indexOf('--vs') + 1] : 'random') as ArenaGame['vs'];
+const strOpt = (name: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
+const preview = strOpt('preview') as ArenaGame['preview'];
+const vsPreview = strOpt('vs-preview') as ArenaGame['vsPreview'];
+const vsReplacements = strOpt('vs-replacements') as ArenaGame['vsReplacements'];
+const replacements = strOpt('replacements') as ArenaGame['replacements'];
 const jobs = Math.max(1, Math.min(games, opt('jobs', defaultThreads())));
 const solve = { samples: opt('samples', 2), keep: opt('keep', 6), perSlot: opt('perslot', 3), replies: opt('replies', 2), iterations: 1500 };
 
@@ -25,7 +34,7 @@ const report = (r: ArenaResult) => {
 };
 
 if (jobs === 1) {
-	for (let g = 0; g < games; g++) report(playArenaGame({ game: g, vs, solve }));
+	for (let g = 0; g < games; g++) report(playArenaGame({ game: g, vs, solve, preview, vsPreview, vsReplacements, replacements }));
 } else {
 	console.log(`Playing ${games} games, ${jobs} at a time...`);
 	let next = 0;
@@ -33,7 +42,7 @@ if (jobs === 1) {
 		const w = new Worker(new URL('./arena-worker.ts', import.meta.url), { execArgv: ['--import', 'tsx'] });
 		const feed = () => {
 			if (next >= games) { void w.terminate().then(() => resolve()); return; }
-			w.postMessage({ game: next++, vs, solve } satisfies ArenaGame);
+			w.postMessage({ game: next++, vs, solve, preview, vsPreview, vsReplacements, replacements } satisfies ArenaGame);
 		};
 		w.on('message', (m: ArenaResult | 'ready') => { if (m !== 'ready') report(m); feed(); });
 		w.on('error', reject);

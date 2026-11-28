@@ -6,7 +6,8 @@ import { makeRng, type Policy } from '../sim/play.js';
 import { viewOfLog } from '../state/parser.js';
 import { OpponentModel } from '../belief/sets.js';
 import type { SetPrior } from '../data/priors.js';
-import { solveTurn, type SolveOptions, type SolveResult } from './solver.js';
+import { chooseReplacementSync, solveTurn, type SolveOptions, type SolveResult } from './solver.js';
+import { previewFromLog } from './preview.js';
 
 /** Rewrite "switch N" from a rebuilt battle's team order to the real battle's. */
 export function translateChoice(from: Battle, to: Battle, side: SideIndex, choice: string): string {
@@ -25,6 +26,13 @@ export interface SolverBotOptions {
 	play?: 'mix' | 'best';
 	prior?: SetPrior;
 	seed?: number;
+	/** Team preview: the matchup solver (default) or a random pick. */
+	preview?: 'solver' | 'random';
+	/**
+	 * After a faint: bring in the healthiest (default), or search each replacement. (Search didn't
+	 * win more games with the hand-written evaluator: 56-64 over 120; revisit with the learned one.)
+	 */
+	replacements?: 'search' | 'healthiest';
 }
 
 /** The one-turn solver as a player. Only sees what a player would (its own view of the log). */
@@ -39,11 +47,8 @@ export class SolverBot implements Policy {
 		this.rng = makeRng(opts.seed ?? 7);
 	}
 
-	choose(battle: Battle, side: SideIndex, options: string[]): string {
-		const req = sideRequest(battle, side);
-		const random = () => options[Math.floor(this.rng() * options.length)]!;
-		if (!req || req.teamPreview) return random();
-		if (req.forceSwitch) return healthiestSwitch(battle, side, options);
+	/** The opponent model, fed with the log so far. */
+	private ensureModel(battle: Battle, side: SideIndex): OpponentModel {
 		const me = battle.sides[side]!.id as 'p1' | 'p2';
 		if (!this.model) {
 			this.model = new OpponentModel({
@@ -55,9 +60,45 @@ export class SolverBot implements Policy {
 		}
 		const view = viewOfLog(battle.log, me);
 		for (; this.fed < view.length; this.fed++) this.model.feed(view[this.fed]!);
+		return this.model;
+	}
+
+	choose(battle: Battle, side: SideIndex, options: string[]): string {
+		const req = sideRequest(battle, side);
+		const random = () => options[Math.floor(this.rng() * options.length)]!;
+		if (!req) return random();
+		if (req.teamPreview) {
+			if (this.opts.preview === 'random') return random();
+			const me = battle.sides[side]!.id as 'p1' | 'p2';
+			try {
+				const team = battle.sides[side]!.team as PokemonSet[];
+				const res = previewFromLog({ lines: viewOfLog(battle.log, me), me, team, prior: this.opts.prior, seed: Math.floor(this.rng() * 1e6) });
+				// (Showdown takes the four in any order: leads first, then the back in our preferred order.)
+				return new Set(res.pick).size === 4 ? `team ${res.pick.map(i => i + 1).join('')}` : random();
+			} catch {
+				return random();
+			}
+		}
+		const me = battle.sides[side]!.id as 'p1' | 'p2';
+		if (req.forceSwitch) {
+			if (this.opts.replacements !== 'search' || options.length <= 1) return healthiestSwitch(battle, side, options);
+			const model = this.ensureModel(battle, side);
+			const mine = battle.sides[side]!.pokemon;
+			const replacements = options.map(choice => ({
+				choice,
+				slots: choice.split(', ').flatMap((part, slot) => {
+					const m = /^switch (\d)$/.exec(part);
+					const p = m ? mine[Number(m[1]) - 1] : undefined;
+					return p ? [{ slot, set: p.set as PokemonSet, hp: p.hp, maxHp: p.maxhp, status: p.status }] : [];
+				}),
+			}));
+			const res = chooseReplacementSync({ state: model.state, me, myTeam: mine.map(p => p.set as PokemonSet), model, replacements, options: { seed: Math.floor(this.rng() * 1e6), ...this.opts.solve } });
+			return res.choice ?? healthiestSwitch(battle, side, options);
+		}
+		const model = this.ensureModel(battle, side);
 		try {
 			const res = solveTurn({
-				state: this.model.state, me, myTeam: battle.sides[side]!.pokemon.map(p => p.set as PokemonSet), model: this.model,
+				state: model.state, me, myTeam: battle.sides[side]!.pokemon.map(p => p.set as PokemonSet), model,
 				// We know our own Pokémon, whatever disguise the log shows.
 				ownZoroark: battle.sides[side]!.active.map((p, slot) => ({ slot, isZoroark: !!p && p.baseSpecies.baseSpecies === 'Zoroark' })),
 				options: { seed: Math.floor(this.rng() * 1e6), ...this.opts.solve },
