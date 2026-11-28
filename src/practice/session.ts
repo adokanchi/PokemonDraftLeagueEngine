@@ -13,8 +13,9 @@ import { OpponentModel } from '../belief/sets.js';
 import type { SetPrior } from '../data/priors.js';
 import { knowledgeFromState, type TeamKnowledge } from '../state/knowledge.js';
 import type { SideId } from '../state/types.js';
-import { describeChoice, solveTurn, solveTurnParallel, type SolveOptions, type SolveResult } from '../engine/solver.js';
+import { chooseReplacement, describeChoice, solveTurn, solveTurnParallel, type SolveOptions, type SolveResult } from '../engine/solver.js';
 import type { SearchPool } from '../engine/pool.js';
+import { previewFromLog } from '../engine/preview.js';
 
 export interface SessionOptions {
 	room: string;
@@ -30,6 +31,8 @@ export interface SessionOptions {
 	solve?: SolveOptions;
 	pool?: SearchPool;
 	seed?: number;
+	/** After a faint: bring in the healthiest (default) or search each replacement. */
+	replacements?: 'search' | 'healthiest';
 	/** Send a command in this battle room (e.g. "/choose move 1 1, move 2|3"). */
 	send: (command: string) => void;
 	/** Progress notes (decisions and what the engine expects). */
@@ -46,6 +49,7 @@ export class BattleSession {
 	private lastRequest?: BattleSession['request'];
 	private request?: Request & { rqid?: number; side: { id: SideId; name: string; pokemon: (RequestPokemon & { stats?: unknown })[] } };
 	private turnSeen = 0;
+	private logSinceChoice = false;
 	private decidedTurn = -1;
 	private deciding = false;
 	private rng: () => number;
@@ -72,6 +76,7 @@ export class BattleSession {
 				continue;
 			}
 			this.lines.push(line);
+			if (line.startsWith('|') && line.length > 1) this.logSinceChoice = true;
 			if (line.startsWith('|turn|')) this.turnSeen = Number(line.slice(6));
 			if (line.startsWith('|win|')) { this.ended = true; this.winner = line.slice(5); }
 			if (line === '|tie') this.ended = true;
@@ -91,8 +96,10 @@ export class BattleSession {
 	private async maybeAct() {
 		const req = this.request;
 		if (!req || req.wait || this.deciding || this.ended) return;
-		if (req.teamPreview) return this.teamPreview(req);
-		if (req.forceSwitch) return this.forceSwitch(req);
+		// (Wait for the preview itself — their six — which follows the request.)
+		if (req.teamPreview) return this.lines.includes('|teampreview') || this.lines.some(l => l.startsWith('|teampreview|')) ? this.teamPreview(req) : undefined;
+		// (Wait for the log of the faint, which can arrive just before or just after the request.)
+		if (req.forceSwitch) { if (this.logSinceChoice) await this.forceSwitch(req); return; }
 		// A move request arrives just before the log of the turn it's for: wait for "|turn|N".
 		if (req.active && this.turnSeen > this.decidedTurn) {
 			this.decidedTurn = this.turnSeen;
@@ -105,6 +112,7 @@ export class BattleSession {
 		const rqid = this.request?.rqid;
 		this.lastRequest = this.request;
 		this.request = undefined;
+		this.logSinceChoice = false;
 		this.opts.send(`/choose ${choice}${rqid !== undefined ? `|${rqid}` : ''}`);
 	}
 
@@ -125,6 +133,16 @@ export class BattleSession {
 			}
 		}
 		if (picks.length !== 4) {
+			try {
+				const res = previewFromLog({ lines: this.lines, me: this.me, team: this.opts.team, knowledge: this.opts.knowledge, megaStones: this.opts.megaStones, prior: this.opts.prior, seed: Math.floor(this.rng() * 1e6) });
+				picks = res.pick.map(i => party.findIndex(p => this.setFor(p) === this.opts.team[i]) + 1);
+				const like = res.theirLikely[0];
+				if (like) this.opts.note?.(`expecting them to bring ${like.order.map(j => res.theirSpecies[j]).join(', ')} (${(100 * like.p).toFixed(0)}%)`);
+			} catch (e) {
+				this.opts.note?.(`preview solver failed (${(e as Error).message}); picking at random`);
+			}
+		}
+		if (picks.length !== 4 || picks.some(i => i < 1)) {
 			const options = enumerateChoices(req, { foeAlive: [true, true], selfAlive: [true, true] });
 			const pick = options[Math.floor(this.rng() * options.length)]!;
 			picks = pick.slice(5).split('').map(Number);
@@ -145,17 +163,44 @@ export class BattleSession {
 		return { foeAlive: alive(them), selfAlive: alive(this.me) };
 	}
 
-	/** Forced switch: bring in the healthiest Pokémon available. */
-	private forceSwitch(req: NonNullable<BattleSession['request']>) {
+	/** Forced switch: the healthiest, or (with `replacements: 'search'`) the best by search. */
+	private async forceSwitch(req: NonNullable<BattleSession['request']>) {
 		const options = enumerateChoices(req, this.targetContext());
-		const hp = (i: number) => {
+		const condition = (i: number) => {
 			const c = req.side.pokemon[i - 1]?.condition ?? '0';
-			const [cur, max] = c.split(' ')[0]!.split('/').map(Number);
-			return max ? cur! / max : 0;
+			const [hp, status] = c.split(' ');
+			const [cur, max] = hp!.split('/').map(Number);
+			return { hp: cur ?? 0, maxHp: max ?? 100, status: status === 'fnt' ? '' : status ?? '' };
 		};
-		const score = (choice: string) => [...choice.matchAll(/switch (\d)/g)].reduce((s, m) => s + hp(Number(m[1])), 0);
-		const best = options.sort((a, b) => score(b) - score(a))[0];
-		if (best) this.choose(best);
+		const hpFrac = (i: number) => { const c = condition(i); return c.maxHp ? c.hp / c.maxHp : 0; };
+		const healthiest = () => [...options].sort((a, b) => score(b) - score(a))[0];
+		const score = (choice: string) => [...choice.matchAll(/switch (\d)/g)].reduce((s, m) => s + hpFrac(Number(m[1])), 0);
+		let pick = healthiest();
+		const model = this.ensureModel();
+		if (model && options.length > 1 && this.opts.replacements === 'search') {
+			this.deciding = true;
+			try {
+				const replacements = options.map(choice => ({
+					choice,
+					slots: choice.split(', ').flatMap((part, slot) => {
+						const m = /^switch (\d)$/.exec(part);
+						const p = m ? req.side.pokemon[Number(m[1]) - 1] : undefined;
+						const set = p && this.setFor(p);
+						return set ? [{ slot, set, ...condition(Number(m![1])) }] : [];
+					}),
+				}));
+				const myTeam = req.side.pokemon.slice(0, 4).map(p => this.setFor(p)).filter((s): s is PokemonSet => !!s);
+				const res = await chooseReplacement({ state: model.state, me: this.me!, myTeam, model, replacements, pool: this.opts.pool, options: { seed: Math.floor(this.rng() * 1e6), ...this.opts.solve } });
+				if (res.choice) {
+					pick = res.choice;
+					const names = (c: string) => [...c.matchAll(/switch (\d)/g)].map(m => speciesOf(req.side.pokemon[Number(m[1]) - 1]!.details)).join(' + ');
+					this.opts.note?.(`replacing with ${names(pick)} (${res.values.map(v => `${names(v.choice)} ${v.value.toFixed(2)}`).join(', ')})`);
+				}
+			} finally {
+				this.deciding = false;
+			}
+		}
+		if (pick && this.request === req) this.choose(pick);
 	}
 
 	private ensureModel(): OpponentModel | undefined {

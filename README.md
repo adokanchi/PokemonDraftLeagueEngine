@@ -31,7 +31,7 @@ changed. If `npm test` says setup isn't finished, it tells you which step is mis
 1. Start a local Showdown server (first start takes a minute): `npm run server`
 2. In a second terminal, start the engine with the team it should play (Showdown export format):
    `npm run practice -- --team their-team.txt`
-   (optional: `--bring "A,B,C,D"` to fix its four and their order, `--name`, `--threads N`)
+   (optional: `--bring "A,B,C,D"` to fix its four and their order instead of using its preview solver, `--name`, `--threads N`)
 3. Open http://localhost:8000 in your browser. It opens the normal Showdown client connected to your
    server. Pick any name (no password needed), import your team in the teambuilder, and challenge
    **EngineBot** to **[Gen 9 Champions] VGC 2026 Reg M-C** — single game or Bo3.
@@ -53,6 +53,7 @@ from your main Showdown account, so import them there once.
 | `npm run parse-log -- examples/sample-battle.log --turn 4` | Show what a player knows at a point in a battle (log, replay JSON or saved replay HTML; `--as p1`, `--json`) |
 | `npm run parse-log -- replay.html --as p1 --team my-team.txt --turn 5` | Same, plus the chance each opposing Pokémon is a disguised Zoroark (when one is in their preview) |
 | `npm run advise -- replay.html --as p1 --team my-team.txt --turn 5` | Recommended play for a turn (a mixed strategy), what they're likely to do, Illusion odds, and their likely sets. Optional `--bring "A,B,C,D"` (in the order you picked them; also lets it see through your own Zoroark), `--zoroark a\|b\|none` (which slot is your Zoroark, when the log can't tell), `--their-roster rosters.json:b`, `--samples N --keep N`, `--threads N` (default: all hardware threads but one) |
+| `npm run preview -- --team my-team.txt --theirs "A, B, C, D, E, F"` | Team preview advice: which four to bring and who leads, a one-on-one matchup table, and what they're likely to bring. `--log game1.html --as p1` (repeatable) takes their six and what earlier games revealed from logs; `--their-roster` marks their Megas |
 | `npm run server` | Local Showdown server on port 8000 (no passwords), for practice games |
 | `npm run practice -- --team their-team.txt` | The engine as a Showdown bot ("EngineBot") that accepts challenges on the local server; see above |
 | `npm run arena -- 20 [--vs greedy] [--jobs N]` | Bot-vs-bot games: the solver against a random player (or a one-turn greedy bot that can see both teams); `--jobs` games at a time on worker threads (default: all threads but one) |

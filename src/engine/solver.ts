@@ -353,3 +353,78 @@ export async function solveTurnParallel(input: SolveInput, pool: { setup(dets: D
 	res.ms = performance.now() - p.t0;
 	return res;
 }
+
+/** A possible replacement after a faint: the choice string, and who goes into which slot. */
+export interface ReplacementOption {
+	choice: string;
+	slots: { slot: number; set: PokemonSet; hp?: number; maxHp?: number; status?: string }[];
+}
+
+/**
+ * The known state as it would be at the start of next turn if these replacements came in
+ * (the opponent's own replacements, if any, are unknown and left out).
+ */
+export function stateWithReplacements(state: KnownBattleState, me: SideId, slots: ReplacementOption['slots']): KnownBattleState {
+	const out = structuredClone(state);
+	const side = out.sides[me];
+	for (const r of slots) {
+		const ident = `${me}: ${r.set.name}`;
+		let mon = side.pokemon.find(p => p.ident === ident) ?? side.pokemon.find(p => !p.seen && p.teamSpecies === r.set.species);
+		if (!mon) {
+			mon = {
+				ident, side: me, name: r.set.name, species: r.set.species, teamSpecies: r.set.species, permanentSpecies: r.set.species,
+				level: r.set.level || 50, gender: '', hp: r.hp ?? 100, maxHp: r.maxHp ?? 100, status: '', boosts: {}, volatiles: {},
+				fainted: false, activeSlot: null, seen: true, megaEvolved: false, moves: {}, item: { swapped: false },
+			} as KnownBattleState['sides'][SideId]['pokemon'][number];
+			side.pokemon.push(mon);
+		}
+		const old = side.pokemon.find(p => p.ident === side.active[r.slot]);
+		if (old) old.activeSlot = null;
+		if (r.hp !== undefined) { mon.hp = r.hp; mon.maxHp = r.maxHp ?? mon.maxHp; }
+		if (r.status !== undefined) mon.status = r.status as never;
+		Object.assign(mon, { activeSlot: r.slot, seen: true, switchedInTurn: state.turn, boosts: {}, volatiles: {}, lastMove: undefined, lastMoveTurn: undefined });
+		mon.stint = { timesAttacked: 0, moves: {}, faintedAllies: side.pokemon.filter(p => p.fainted).length };
+		side.active[r.slot] = mon.ident;
+	}
+	out.turn = state.turn + 1;
+	return out;
+}
+
+/**
+ * After a faint: score each replacement by searching the next turn from the position it leads to,
+ * and pick the best (in-process, or on a worker pool).
+ */
+export async function chooseReplacement(input: ReplacementInput & { pool?: Parameters<typeof solveTurnParallel>[1] }): Promise<ReplacementResult> {
+	const values: { choice: string; value: number }[] = [];
+	for (const [r, sub] of replacementSearches(input)) {
+		try { values.push({ choice: r.choice, value: (input.pool ? await solveTurnParallel(sub, input.pool) : solveTurn(sub)).value }); } catch { values.push({ choice: r.choice, value: -Infinity }); }
+	}
+	return pickReplacement(input, values);
+}
+
+/** Same, in this thread. */
+export function chooseReplacementSync(input: ReplacementInput): ReplacementResult {
+	const values: { choice: string; value: number }[] = [];
+	for (const [r, sub] of replacementSearches(input)) {
+		try { values.push({ choice: r.choice, value: solveTurn(sub).value }); } catch { values.push({ choice: r.choice, value: -Infinity }); }
+	}
+	return pickReplacement(input, values);
+}
+
+export type ReplacementInput = Omit<SolveInput, 'state'> & { state: KnownBattleState; replacements: ReplacementOption[] };
+export interface ReplacementResult {
+	/** The best replacement, or undefined if none could be searched (use a fallback). */
+	choice?: string;
+	values: { choice: string; value: number }[];
+}
+
+function replacementSearches(input: ReplacementInput): [ReplacementOption, SolveInput][] {
+	if (input.replacements.length <= 1) return [];
+	return input.replacements.map(r => [r, { ...input, state: stateWithReplacements(input.state, input.me, r.slots), options: { samples: 3, keep: 8, perSlot: 3, replies: 2, iterations: 1000, ...input.options } }]);
+}
+
+function pickReplacement(input: ReplacementInput, values: { choice: string; value: number }[]): ReplacementResult {
+	if (input.replacements.length === 1) return { choice: input.replacements[0]!.choice, values };
+	values.sort((a, b) => b.value - a.value);
+	return { choice: values[0] && values[0].value > -Infinity ? values[0].choice : undefined, values };
+}
