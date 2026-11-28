@@ -28,6 +28,8 @@ export interface GameLabels {
 	winner?: SideId;
 	players: Record<SideId, string>;
 	turns: TurnLabel[];
+	/** The last turn if it never ran (the game ended by forfeit or timer first). */
+	unplayedTurn?: number;
 	/** Replacements after faints (end of turn): who came in. */
 	replacements: { turn: number; side: SideId; slot: number; species: string }[];
 }
@@ -97,7 +99,14 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 			}
 			if (cmd === 'faint') {
 				const p = pos(args[0]);
-				if (p) { slotsNow[p.side][p.slot] = null; faintedFoeSlots[p.side].add(p.slot); }
+				if (p) {
+					const key = `${p.side}${p.slot}`;
+					if (!decided.has(key) && labels[p.side][p.slot]?.action === 'unknown' && slotsNow[p.side][p.slot] === occupant[p.side][p.slot]) {
+						labels[p.side][p.slot] = { action: 'unknown', why: 'fainted before acting' };
+						decided.add(key);
+					}
+					slotsNow[p.side][p.slot] = null; faintedFoeSlots[p.side].add(p.slot);
+				}
 				continue;
 			}
 			if (cmd === 'move' || cmd === 'cant') {
@@ -129,7 +138,13 @@ export function labelLog(log: string | string[], format: ResolvedFormat = resolv
 				continue;
 			}
 		}
-		for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side] });
+		if (ls.some(l => l.startsWith('|win|') || l === '|tie')) for (const side of ['p1', 'p2'] as const) labels[side].forEach((l, i) => {
+			if (l?.action === 'unknown' && l.why === 'no action shown') labels[side][i] = { action: 'unknown', why: 'game ended first' };
+		});
+		// A turn that never ran (forfeit or timer loss right after |turn|) has no choices to read.
+		const ran = ls.some(l => /^\|(move|cant|switch|drag)\|/.test(l));
+		if (ran) for (const side of ['p1', 'p2'] as const) out.turns.push({ turn: t, side, slots: labels[side] });
+		else out.unplayedTurn = t;
 		// Replacements after the turn's actions: switches after upkeep.
 		const up = ls.findIndex(l => l === '|upkeep');
 		for (const line of up >= 0 ? ls.slice(up) : []) {
